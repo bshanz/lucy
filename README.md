@@ -1,6 +1,6 @@
 # Lucy - a personal AI assistant you text like a person
 
-Lucy is a self-hosted personal assistant that lives in **iMessage and Slack**. She reads and triages your **Gmail**, manages your **Google Calendar and Tasks**, schedules **reminders that follow up until you actually do the thing**, keeps **long-term memory**, and quietly maintains a **diary of your life** - all running on infrastructure you own, with your data going nowhere you didn't put it.
+Lucy is a personal assistant that lives in **iMessage and Slack**, deployed entirely on accounts you own. She reads and triages your **Gmail**, manages your **Google Calendar and Tasks**, schedules **reminders that follow up until you actually do the thing**, keeps **long-term memory**, and quietly maintains a **diary of your life**. No third-party assistant product in the loop: your deployment, your database, your API keys, and your data live in your own Vercel, Supabase, and Google accounts. (Prefer real self-hosting? eve's build output runs on any Node host via `eve start`.)
 
 ```
 you  →  iMessage: "remind me tomorrow at 9 to follow up with Alex,
@@ -59,7 +59,7 @@ The fastest path: paste the prompt below into an agentic coding tool (Claude Cod
 <summary><b>📋 Copy this prompt</b></summary>
 
 ```
-Set up my own instance of Lucy, the self-hosted personal AI assistant from
+Set up my own instance of Lucy, the personal AI assistant from
 https://github.com/bshanz/lucy - an eve (Vercel) agent reachable over iMessage
 (Sendblue) and optionally Slack, with Gmail/Calendar/Tasks via Vercel Connect,
 reminders, memory, and a diary, backed by Supabase.
