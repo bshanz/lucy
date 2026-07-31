@@ -1,0 +1,28 @@
+{
+  "name": "lucy",
+  "type": "module",
+  "private": true,
+  "imports": {
+    "#*": "./agent/*"
+  },
+  "scripts": {
+    "dev": "eve dev",
+    "build": "eve build",
+    "start": "eve start",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.108.2",
+    "@vercel/connect": "0.5.0",
+    "ai": "^7.0.38",
+    "eve": "^0.27.13",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.x",
+    "typescript": "7.0.1-rc"
+  },
+  "engines": {
+    "node": "24.x"
+  }
+}

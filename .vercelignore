@@ -1,0 +1,6 @@
+node_modules
+.env*
+.eve
+.workflow-data
+.output
+dist
