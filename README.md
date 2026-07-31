@@ -51,7 +51,65 @@ Design decisions worth knowing about (they're where the bugs live):
 - **The model doesn't know what time it is, either.** Every inbound dispatch injects the current owner-local time as session context, and time-validation errors echo the current time back so the model self-corrects in one retry ("tomorrow" from a model with no clock is a footgun).
 - **Personal data lives in env, not code.** The persona (`agent/instructions.ts`) is templated at build time from `OWNER_*` vars.
 
-## Setup
+## Setup with an AI agent (recommended)
+
+The fastest path: paste the prompt below into an agentic coding tool (Claude Code, Cursor, etc.) opened in an empty directory, and it will drive the setup — pausing for the handful of steps only you can do (signing into Google, sending one verification text, entering payment details if you upgrade anything).
+
+<details>
+<summary><b>📋 Copy this prompt</b></summary>
+
+```
+Set up my own instance of Lucy, the self-hosted personal AI assistant from
+https://github.com/bshanz/lucy — an eve (Vercel) agent reachable over iMessage
+(Sendblue) and optionally Slack, with Gmail/Calendar/Tasks via Vercel Connect,
+reminders, memory, and a diary, backed by Supabase.
+
+Clone the repo first, then follow README.md's Setup section exactly. Work
+through it in this order, and treat the ⚠️ traps in the README as hard
+requirements — each one is a silent-failure mode someone already hit:
+
+1. Ask me for: my name, phone (E.164), email, IANA timezone, and what I want
+   the assistant called. These become the OWNER_* / AGENT_NAME env vars.
+   My personal details go ONLY in .env.local and deployment env — never in
+   committed files.
+2. Install deps; copy .env.example to .env.local and fill in what you know.
+   Generate LUCY_AGENT_SECRET with `openssl rand -hex 32`.
+3. Supabase: create a project (ask me to approve any cost), apply
+   supabase/migrations/0001_init.sql, collect the URL + sb_secret_ key.
+4. Sendblue: `npm i -g @sendblue/cli`, then `sendblue setup --phone <my
+   number> --no-wait`. Relay the verification phrase; I'll text it from my
+   phone; poll `sendblue setup --check` until it lands. Then `sendblue
+   show-keys` and `sendblue lines` for the env vars.
+5. Vercel: `vercel link`, push every env var to production with
+   `vercel env add NAME production --no-sensitive --value "..."` (the
+   --no-sensitive flag matters), deploy with `vercel deploy --prod`, and
+   verify /eve/v1/health. Note: 1-minute crons need Vercel Pro — check my
+   plan and tell me if that's a blocker.
+6. Google: walk me through the Cloud console (or drive my browser if you
+   can): enable Gmail + Calendar + Tasks APIs, External consent screen
+   PUBLISHED TO PRODUCTION (never leave it in Testing — refresh tokens die
+   in 7 days), Web application OAuth client with redirect URI
+   https://connect.vercel.com/callback in Authorized redirect URIs. Then a
+   Vercel Connect OAuth connector per the README (offline+consent params on
+   the auth endpoint, the three scopes, User Authorization + Refresh Tokens
+   ON), UID → GMAIL_CONNECTOR_UID. Mint BOTH grants: dev via
+   scripts/authorize-gmail.mjs, production via the deployed
+   /eve/v1/gmail/authorize route — grants are bucketed per environment.
+   I do all Google sign-ins myself.
+7. Slack (ask me if I want it): follow the README's connector steps,
+   including the detach/attach trigger re-point to /eve/v1/slack.
+8. Verify end-to-end: npx tsc clean, `eve info` shows the channels/tools/
+   schedules, then have me text the Sendblue number and confirm a reply,
+   a reminder round-trip, and (if Google is connected) an inbox summary.
+
+Never ask me to paste passwords or payment details to you; anything
+requiring them, hand to me. If a step fails, check the README's ⚠️ notes
+for that step before retrying differently.
+```
+
+</details>
+
+## Setup (manual)
 
 You'll need: Node 24+, a Vercel account (Pro, for 1-minute crons), a Supabase account, a Google account, and ~45 minutes. Every trap we know about is flagged with ⚠️.
 
