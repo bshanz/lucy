@@ -146,6 +146,37 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
     async "actions.requested"(_data, channel) {
       await sendTypingIndicator(channel.state.phone).catch(() => {});
     },
+    // iMessage has no buttons, so HITL prompts must go out as plain text.
+    // eve resolves a reply that matches an option id, label, or 1-based index,
+    // and holds unrelated messages until the request is answered — without this
+    // handler the session parks silently and Lucy goes dark.
+    async "input.requested"(data, channel) {
+      for (const request of data.requests) {
+        const lines: string[] = [];
+        if (request.display === "confirmation") {
+          lines.push(`⚠️ Approval needed: ${request.action.toolName}`);
+          for (const [key, value] of Object.entries(request.action.input ?? {})) {
+            const text = typeof value === "string" ? value : JSON.stringify(value);
+            lines.push(`${key}: ${text.length > 1200 ? `${text.slice(0, 1200)}…` : text}`);
+          }
+          lines.push(`Reply "approve" to run it or "deny" to skip.`);
+        } else {
+          lines.push(request.prompt);
+          const options = request.options ?? [];
+          options.forEach((option, index) => {
+            lines.push(`${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`);
+          });
+          if (options.length > 0) {
+            lines.push(
+              request.allowFreeform
+                ? "Reply with a number, or answer in your own words."
+                : "Reply with a number.",
+            );
+          }
+        }
+        await channel.reply(lines.join("\n"));
+      }
+    },
     async "message.completed"(data, channel) {
       // Interim narration before tool calls isn't a reply; skip it.
       if (data.finishReason === "tool-calls" || !data.message) return;

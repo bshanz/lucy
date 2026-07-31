@@ -16,8 +16,9 @@ import { supabase } from "#lib/supabase.js";
  * Correctness rules (borrowed from the help-bot gmail poller):
  *  - claim BEFORE dispatch (insert into processed_messages, ignore dupes),
  *    un-claim on dispatch failure — a crash loses one reply, never doubles.
- *  - one dispatch per pass per phone (batched) — two concurrent sends on the
- *    same continuation token race the park hook.
+ *  - sequential dispatch, oldest first — two concurrent sends on the same
+ *    continuation token race the park hook, and joining texts into one batch
+ *    breaks eve's approve/deny reply matching during pending approvals.
  *
  * `eve dev` never fires crons — trigger locally with
  * `curl -X POST http://localhost:3000/eve/v1/dev/schedules/sendblue-poll`.
@@ -51,23 +52,26 @@ async function pollOnce(receive: ScheduleHandlerArgs["receive"], owner: string):
   const fresh = candidates.filter((m) => claimedIds.has(messageKey(m)));
   if (fresh.length === 0) return;
 
-  const message =
-    fresh.length === 1 ? fresh[0].content! : fresh.map((m) => m.content!.trim()).join("\n");
-
+  // Dispatch one at a time, in order — sequential awaits never race the park
+  // hook, and keeping each text as its own message lets eve's HITL matcher
+  // resolve an "approve"/"deny" reply that a joined batch would swallow.
   console.log(`[sendblue-poll] dispatching ${fresh.length} message(s) from ${owner}`);
-  try {
-    await receive(sendblue, {
-      message,
-      target: { phone: owner },
-      auth: sendblueAuth(owner),
-    });
-  } catch (err) {
-    // Un-claim so a later pass retries.
-    await supabase
-      .from("processed_messages")
-      .delete()
-      .in("message_id", fresh.map(messageKey));
-    throw err;
+  for (let i = 0; i < fresh.length; i++) {
+    try {
+      await receive(sendblue, {
+        message: fresh[i].content!,
+        target: { phone: owner },
+        auth: sendblueAuth(owner),
+      });
+    } catch (err) {
+      // Un-claim this message and everything after it so a later pass retries
+      // in order; what already dispatched stays claimed.
+      await supabase
+        .from("processed_messages")
+        .delete()
+        .in("message_id", fresh.slice(i).map(messageKey));
+      throw err;
+    }
   }
 }
 
