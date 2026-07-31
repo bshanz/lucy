@@ -1,7 +1,7 @@
 import { defineSchedule } from "eve/schedules";
 import type { ScheduleHandlerArgs } from "eve/schedules";
 import sendblue, { sendblueAuth } from "#channels/sendblue.js";
-import { fetchRecentInbound, messageKey } from "#lib/sendblue.js";
+import { fetchRecentInbound, messageKey, sendTypingIndicator } from "#lib/sendblue.js";
 import { supabase } from "#lib/supabase.js";
 
 /**
@@ -24,7 +24,7 @@ import { supabase } from "#lib/supabase.js";
  * `curl -X POST http://localhost:3000/eve/v1/dev/schedules/sendblue-poll`.
  */
 
-const PASSES = 5; // t = 0s, 10s, 20s, 30s, 40s — done well before the next tick
+const PASSES = 6; // t = 0s..50s — the t=50s pass may overlap the next tick, but the claim dedupes
 const PASS_INTERVAL_MS = 10_000;
 
 async function pollOnce(receive: ScheduleHandlerArgs["receive"], owner: string): Promise<void> {
@@ -51,6 +51,10 @@ async function pollOnce(receive: ScheduleHandlerArgs["receive"], owner: string):
   const claimedIds = new Set((claimed ?? []).map((r) => r.message_id as string));
   const fresh = candidates.filter((m) => claimedIds.has(messageKey(m)));
   if (fresh.length === 0) return;
+
+  // Show "typing…" the moment a message is claimed — dispatch plus workflow
+  // spin-up adds seconds before turn.started would send it.
+  await sendTypingIndicator(owner).catch(() => {});
 
   // Dispatch one at a time, in order — sequential awaits never race the park
   // hook, and keeping each text as its own message lets eve's HITL matcher
