@@ -5,6 +5,9 @@ settings:
   excludeLinksFromLockfile: false
 
 dependencies:
+  '@agent-browser/eve':
+    specifier: ^0.33.1
+    version: 0.33.1(eve@0.27.13)
   '@supabase/supabase-js':
     specifier: ^2.108.2
     version: 2.111.0
@@ -30,6 +33,28 @@ devDependencies:
     version: 7.0.1-rc
 
 packages:
+
+  /@agent-browser/eve@0.33.1(eve@0.27.13):
+    resolution: {integrity: sha512-3UxQEcga+elW0ltThv26D3ysQc8JWvcuT1ikx5a6RCd8MkGAJUZhF8gZu6Q/Dp4hgwvYFqqxqR1lCkJbHAx7eg==}
+    engines: {node: '>=24.0.0'}
+    peerDependencies:
+      eve: '>=0.25.1'
+    dependencies:
+      '@agent-browser/sandbox': 0.33.1
+      eve: 0.27.13(ai@7.0.42)
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - '@vercel/sandbox'
+    dev: false
+
+  /@agent-browser/sandbox@0.33.1:
+    resolution: {integrity: sha512-GLxPrfBHJ7ekbdh2vVk482S7ZN7xFq4ujFAndWQXdV3PiXd8VgGKK36UEIp0qHLfNRADXZSCJ6TA9IWb6fd1Lw==}
+    peerDependencies:
+      '@vercel/sandbox': '>=1.0.0'
+    peerDependenciesMeta:
+      '@vercel/sandbox':
+        optional: true
+    dev: false
 
   /@ai-sdk/gateway@4.0.32(zod@4.4.3):
     resolution: {integrity: sha512-U82ZbFEQY80YTyzOEI0jrCjV4Q52uN7/ln/KyI1AvSNR/IX3XwePOfsQWOfDhvmqXkb3TcYbVzWr4p85msKgOw==}
