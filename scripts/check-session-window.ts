@@ -54,19 +54,23 @@ check("no window yet", await sessionToken(PHONE), PHONE);
 await setWindow(0, 1 * DAY, 5 * HOUR);
 check("window 1d old, idle 5h", await sessionToken(PHONE), PHONE);
 
-// 3. THE mid-thread guard: old enough to rotate, but the conversation is live.
-await setWindow(0, 30 * DAY, 10 * 60 * 1000);
-check("30d old but idle only 10m", await sessionToken(PHONE), PHONE);
+// 3. Pins the 30d threshold: quiet for hours, but not old enough yet.
+await setWindow(0, 20 * DAY, 6 * HOUR);
+check("20d old, idle 6h (under threshold)", await sessionToken(PHONE), PHONE);
+
+// 4. THE mid-thread guard: old enough to rotate, but the conversation is live.
+await setWindow(0, 45 * DAY, 10 * 60 * 1000);
+check("45d old but idle only 10m", await sessionToken(PHONE), PHONE);
 
 // 4. Old AND quiet: rotate.
-await setWindow(0, 30 * DAY, 6 * HOUR);
-check("30d old, idle 6h", await sessionToken(PHONE), `${PHONE}#1`);
+await setWindow(0, 45 * DAY, 6 * HOUR);
+check("45d old, idle 6h", await sessionToken(PHONE), `${PHONE}#1`);
 
 // 5. Rotation is sticky — the next message stays in the new window.
 check("subsequent message", await sessionToken(PHONE), `${PHONE}#1`);
 
 // 6. A stranded approval is worse than a long session: never rotate past one.
-await setWindow(1, 30 * DAY, 6 * HOUR);
+await setWindow(1, 45 * DAY, 6 * HOUR);
 await supabase.from("channel_state").upsert(
   [{
     key: pendingKey,
@@ -79,7 +83,7 @@ check("due to rotate, approval pending", await sessionToken(PHONE), `${PHONE}#1`
 await supabase.from("channel_state").delete().eq("key", pendingKey);
 
 // 7. Read-only lookups must never move the window.
-await setWindow(1, 30 * DAY, 6 * HOUR);
+await setWindow(1, 45 * DAY, 6 * HOUR);
 check("rotate:false on a due window", await sessionToken(PHONE, { rotate: false }), `${PHONE}#1`);
 check("...and it did not rotate", await sessionToken(PHONE, { rotate: false }), `${PHONE}#1`);
 

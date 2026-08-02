@@ -88,7 +88,10 @@ async function clearPendingRequests(phone: string): Promise<void> {
  * Epoch 0 maps to the bare phone number, so the session already running when
  * this shipped is adopted rather than abandoned.
  */
-const MAX_WINDOW_AGE_MS = 7 * 24 * 3600 * 1000;
+// 30 days, not 7: the point is bounding unbounded growth, not keeping the
+// transcript short. A month back is far enough that losing verbatim recall is
+// theoretical, and durable facts live in Supabase (memories/moments) anyway.
+const MAX_WINDOW_AGE_MS = 30 * 24 * 3600 * 1000;
 const IDLE_BEFORE_ROTATE_MS = 2 * 3600 * 1000;
 
 type SessionWindow = { epoch: number; startedAt: string; lastActivityAt: string };
