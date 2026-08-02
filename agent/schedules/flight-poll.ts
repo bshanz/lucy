@@ -56,6 +56,7 @@ function pollHour(): number {
 const WATCH_COLUMNS =
   "id, channel, phone, slack_target, origin_query, destination_query, origin_id, " +
   "destination_id, outbound_date, return_date, currency, adults, travel_class, stops, " +
+  "include_airlines, " +
   "target_price, baseline_price, last_price, last_price_at, alerted_price, alerted_at, " +
   "checked_on, last_checked_at, last_error, consecutive_errors, status, paused_reason, created_at";
 
@@ -236,6 +237,9 @@ export default defineSchedule({
           adults: w.adults,
           travelClass: w.travel_class,
           stops: w.stops,
+          // Re-checks must reproduce the ORIGINAL query, or the daily price is
+          // for a different question than the one the owner asked.
+          includeAirlines: w.include_airlines,
         });
       } catch (err) {
         if (err instanceof FlightSearchError && err.kind === "quota") {

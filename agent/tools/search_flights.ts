@@ -10,6 +10,7 @@ import {
   formatTripDates,
   formatUsd,
   ownerToday,
+  resolveAirlines,
   routeLabel,
   searchFlights,
 } from "#lib/flights.js";
@@ -21,7 +22,9 @@ export default defineTool({
     "what the owner says yourself (Lisbon → LIS, London → LHR,LGW,STN, New York → JFK,EWR,LGA) " +
     "and never ask him for a code; comma-separate up to 4 for a city. Dates are YYYY-MM-DD; omit " +
     "returnDate for one-way. Prices are USD and are the TOTAL fare — a round-trip price covers " +
-    "both legs, but the itinerary shown is the outbound leg only. SEARCHES ARE METERED (250 a " +
+    "both legs, but the itinerary shown is the outbound leg only. If the owner names a carrier " +
+    "(\"United nonstop\"), pass it as `airlines` — do NOT drop it and answer for all carriers. " +
+    "SEARCHES ARE METERED (250 a " +
     "month, shared with price tracking): one search per question, and never sweep a dozen dates. " +
     "For ongoing monitoring use track_flight instead — this is a one-off look.",
   inputSchema: z.object({
@@ -35,11 +38,31 @@ export default defineTool({
       .optional()
       .describe("Default economy"),
     nonstopOnly: z.boolean().optional().describe("Only nonstop itineraries"),
+    airlines: z
+      .string()
+      .optional()
+      .describe(
+        "Restrict to specific carriers when the owner names one — airline name or 2-letter " +
+          "IATA code, comma-separated ('United', 'UA', 'United,Delta'). Alliances work too " +
+          "('Star Alliance'). Omit for all carriers.",
+      ),
     maxPrice: z.number().int().min(1).optional().describe("USD ceiling"),
   }),
   async execute(input) {
     const route = checkRoute(input);
     if (!route.ok) return { ok: false as const, error: route.error };
+
+    // Refuse rather than silently drop the constraint: an unfiltered result set
+    // looks like a perfectly good answer to a question it doesn't answer.
+    const includeAirlines = input.airlines ? resolveAirlines(input.airlines) : null;
+    if (input.airlines && !includeAirlines) {
+      return {
+        ok: false as const,
+        error:
+          `Didn't recognise the airline "${input.airlines}". Pass a 2-letter IATA code ` +
+          `(United → UA, JetBlue → B6, Delta → DL) or an alliance name, then retry.`,
+      };
+    }
 
     // Soft daily budget. Interactive lookups are what actually drain the quota —
     // left unbounded the model will happily explore four dates in one answer.
@@ -70,6 +93,7 @@ export default defineTool({
         travelClass: input.cabin ? cabinToCode(input.cabin) : 1,
         stops: input.nonstopOnly ? 1 : 0,
         maxPrice: input.maxPrice,
+        includeAirlines,
       });
     } catch (err) {
       return { ok: false as const, error: flightErrorMessage(err) };
@@ -97,6 +121,12 @@ export default defineTool({
       route: routeLabel(route.originId, route.destinationId),
       dates: formatTripDates(input.outboundDate, input.returnDate ?? null),
       tripType: result.tripType === "round_trip" ? "round trip" : "one way",
+      // Echoed so the reply can state the filters actually applied — the owner
+      // needs to know whether "United nonstop" was honoured or widened.
+      filters: {
+        nonstopOnly: input.nonstopOnly === true,
+        airlines: includeAirlines,
+      },
       cheapestPrice: formatUsd(result.cheapestPrice),
       // Google's own read of the route — this is what makes a bare number mean
       // something without any accumulated price history of our own.

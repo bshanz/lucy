@@ -32,6 +32,7 @@ type WatchListRow = Pick<
   | "adults"
   | "travel_class"
   | "stops"
+  | "include_airlines"
   | "target_price"
   | "baseline_price"
   | "last_price"
@@ -61,7 +62,8 @@ export default defineTool({
       .from("flight_watches")
       .select(
         "id, origin_query, destination_query, origin_id, destination_id, outbound_date, " +
-          "return_date, adults, travel_class, stops, target_price, baseline_price, last_price, " +
+          "return_date, adults, travel_class, stops, include_airlines, target_price, " +
+          "baseline_price, last_price, " +
           "last_checked_at, last_error, status, paused_reason",
       )
       .in("status", statuses)
@@ -93,6 +95,7 @@ export default defineTool({
           passengers: r.adults,
           cabin: cabinFromCode(r.travel_class),
           nonstopOnly: r.stops === 1,
+          airlines: r.include_airlines ?? undefined,
           currentPrice: r.last_price !== null ? formatUsd(r.last_price) : "not checked yet",
           sinceTracking:
             change === null

@@ -8,6 +8,7 @@ import {
   formatTripDates,
   formatUsd,
   ownerToday,
+  resolveAirlines,
   routeLabel,
   searchFlights,
   summarizeItinerary,
@@ -35,6 +36,14 @@ export default defineTool({
       .optional()
       .describe("Default economy"),
     nonstopOnly: z.boolean().optional().describe("Only nonstop itineraries"),
+    airlines: z
+      .string()
+      .optional()
+      .describe(
+        "Restrict the watch to specific carriers when the owner names one — airline name or " +
+          "2-letter IATA code, comma-separated ('United', 'UA,DL'). Alliances work too. " +
+          "Every daily re-check keeps this filter.",
+      ),
     targetPrice: z
       .number()
       .int()
@@ -45,6 +54,16 @@ export default defineTool({
   async execute(input, ctx) {
     const route = checkRoute(input);
     if (!route.ok) return { ok: false as const, error: route.error };
+
+    const includeAirlines = input.airlines ? resolveAirlines(input.airlines) : null;
+    if (input.airlines && !includeAirlines) {
+      return {
+        ok: false as const,
+        error:
+          `Didn't recognise the airline "${input.airlines}". Pass a 2-letter IATA code ` +
+          `(United → UA, JetBlue → B6, Delta → DL) or an alliance name, then retry.`,
+      };
+    }
 
     // 1. Cap check, BEFORE anything metered runs.
     const { count, error: countError } = await supabase
@@ -75,6 +94,11 @@ export default defineTool({
     dupQuery = input.returnDate
       ? dupQuery.eq("return_date", input.returnDate)
       : dupQuery.is("return_date", null);
+    // Same route on United and same route on any carrier are genuinely
+    // different watches, so the airline filter is part of the identity.
+    dupQuery = includeAirlines
+      ? dupQuery.eq("include_airlines", includeAirlines)
+      : dupQuery.is("include_airlines", null);
     const { data: dup } = await dupQuery.maybeSingle();
     if (dup) {
       return {
@@ -98,6 +122,7 @@ export default defineTool({
         adults: input.adults,
         travelClass: input.cabin ? cabinToCode(input.cabin) : 1,
         stops: input.nonstopOnly ? 1 : 0,
+        includeAirlines,
       });
     } catch (err) {
       return { ok: false as const, error: flightErrorMessage(err) };
@@ -146,6 +171,7 @@ export default defineTool({
         adults: input.adults ?? 1,
         travel_class: input.cabin ? cabinToCode(input.cabin) : 1,
         stops: input.nonstopOnly ? 1 : 0,
+        include_airlines: includeAirlines,
         target_price: input.targetPrice ?? null,
         baseline_price: price,
         last_price: price,
@@ -187,6 +213,7 @@ export default defineTool({
               : null,
           }
         : null,
+      filters: { nonstopOnly: input.nonstopOnly === true, airlines: includeAirlines },
       targetPrice: input.targetPrice ? formatUsd(input.targetPrice) : null,
       cheapestOption: result.cheapest ? summarizeItinerary(result.cheapest) : null,
       link: result.googleFlightsUrl,

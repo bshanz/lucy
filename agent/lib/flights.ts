@@ -95,6 +95,7 @@ export interface FlightWatchRow {
   adults: number;
   travel_class: number;
   stops: number;
+  include_airlines: string | null;
   target_price: number | null;
   baseline_price: number | null;
   last_price: number | null;
@@ -150,6 +151,8 @@ export interface FlightSearchParams {
   travelClass?: number;
   stops?: number;
   maxPrice?: number;
+  /** SerpApi include_airlines: 2-char IATA codes or an alliance name. */
+  includeAirlines?: string | null;
 }
 
 export interface FlightSearchResult {
@@ -249,6 +252,7 @@ export async function searchFlights(p: FlightSearchParams): Promise<FlightSearch
     stops: String(p.stops ?? 0),
     ...(p.returnDate ? { return_date: p.returnDate } : {}),
     ...(p.maxPrice ? { max_price: String(p.maxPrice) } : {}),
+    ...(p.includeAirlines ? { include_airlines: p.includeAirlines } : {}),
   });
 
   let res: Response;
@@ -412,6 +416,32 @@ const METROS: Record<string, string> = {
 const IATA_LIST = /^[A-Z]{3}(,[A-Z]{3}){0,3}$/;
 
 /**
+ * Airline names the owner actually says, mapped to the 2-character IATA codes
+ * SerpApi's include_airlines wants. Without this the model has to know that
+ * "JetBlue" is B6, which it will get wrong often enough to matter — and a wrong
+ * airline code produces a normal-looking response for the wrong question.
+ */
+const AIRLINES: Record<string, string> = {
+  united: "UA", delta: "DL", american: "AA", "american airlines": "AA",
+  jetblue: "B6", southwest: "WN", alaska: "AS", spirit: "NK", frontier: "F9",
+  hawaiian: "HA", allegiant: "G4", "sun country": "SY", "breeze": "MX",
+  "air canada": "AC", westjet: "WS", aeromexico: "AM", copa: "CM",
+  avianca: "AV", latam: "LA", azul: "AD", gol: "G3",
+  "british airways": "BA", lufthansa: "LH", "air france": "AF", klm: "KL",
+  iberia: "IB", tap: "TP", "tap air portugal": "TP", "aer lingus": "EI",
+  "virgin atlantic": "VS", swiss: "LX", austrian: "OS", sas: "SK",
+  norwegian: "DY", finnair: "AY", icelandair: "FI", ryanair: "FR",
+  easyjet: "U2", vueling: "VY", wizz: "W6",
+  emirates: "EK", qatar: "QR", etihad: "EY", turkish: "TK",
+  singapore: "SQ", cathay: "CX", qantas: "QF", "air new zealand": "NZ",
+  jal: "JL", "japan airlines": "JL", ana: "NH", korean: "KE",
+  // SerpApi also accepts alliance names in the same parameter.
+  "star alliance": "STAR_ALLIANCE", skyteam: "SKYTEAM", oneworld: "ONEWORLD",
+};
+
+const AIRLINE_LIST = /^([A-Z0-9]{2}|STAR_ALLIANCE|SKYTEAM|ONEWORLD)(,([A-Z0-9]{2}|STAR_ALLIANCE|SKYTEAM|ONEWORLD)){0,4}$/;
+
+/**
  * Resolve what the owner said into SerpApi's departure_id/arrival_id form.
  * Returns null if it is neither a known metro nor a valid IATA list — the
  * shape check rejects lowercase, 4-letter ICAO (KJFK), and city names typed
@@ -423,6 +453,22 @@ export function resolveAirports(spoken: string): string | null {
   if (metro) return metro;
   const upper = trimmed.toUpperCase().replace(/\s*,\s*/g, ",");
   return IATA_LIST.test(upper) ? upper : null;
+}
+
+/**
+ * Resolve airline names or codes into SerpApi's include_airlines form.
+ * Returns null if it is neither a known name nor a valid code list, so the
+ * caller can refuse rather than silently drop the owner's constraint.
+ */
+export function resolveAirlines(spoken: string): string | null {
+  const parts = spoken
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return null;
+  const codes = parts.map((p) => AIRLINES[p.toLowerCase()] ?? p.toUpperCase());
+  const joined = codes.join(",");
+  return AIRLINE_LIST.test(joined) ? joined : null;
 }
 
 export function isIsoDate(s: string): boolean {
