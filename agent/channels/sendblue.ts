@@ -16,7 +16,10 @@ import { supabase } from "#lib/supabase.js";
  * the owner upgrades to a plan with webhook support; register it then with:
  *   sendblue webhooks add https://<app>/eve/v1/sendblue/webhook?secret=<LUCY_AGENT_SECRET> --type receive
  *
- * One durable session per phone number: continuationToken = the E.164 number.
+ * Sessions are windowed per phone number (see sessionToken): a single forever
+ * session would re-send an ever-growing compacted context on every text, and
+ * eventually trip eve's 40M-input-token session budget with a bare
+ * Approve/Stop prompt the owner never asked for.
  */
 
 type SendblueState = { phone: string };
@@ -63,6 +66,97 @@ async function storePendingRequests(phone: string, requests: PendingRequest[]): 
 
 async function clearPendingRequests(phone: string): Promise<void> {
   await supabase.from("channel_state").delete().eq("key", pendingInputKey(phone));
+}
+
+/**
+ * Conversation windows.
+ *
+ * eve compacts a long session automatically, so context overflow is handled —
+ * but the transcript still grows, every turn re-sends the whole compacted
+ * context as input, and root sessions carry a default 40M input-token budget.
+ * Cross it and eve pauses and emits an Approve/Stop continuation prompt, which
+ * over iMessage reads like Lucy malfunctioning. Windowing keeps each session
+ * days old instead of years, so the budget is never approached and the cap goes
+ * back to being what it's good for: a runaway-loop backstop.
+ *
+ * Rotation is IDLE-BASED, never wall-clock. A window turns over only once it is
+ * old AND the conversation has gone quiet, so a reply is never answered by a
+ * session with no memory of the question. It is also suppressed while an
+ * approval is pending — rotating there would strand a HITL request that can
+ * then never be answered.
+ *
+ * Epoch 0 maps to the bare phone number, so the session already running when
+ * this shipped is adopted rather than abandoned.
+ */
+const MAX_WINDOW_AGE_MS = 7 * 24 * 3600 * 1000;
+const IDLE_BEFORE_ROTATE_MS = 2 * 3600 * 1000;
+
+type SessionWindow = { epoch: number; startedAt: string; lastActivityAt: string };
+
+const sessionKey = (phone: string) => `sendblue:session:${phone}`;
+
+function tokenFor(phone: string, epoch: number): string {
+  return epoch === 0 ? phone : `${phone}#${epoch}`;
+}
+
+async function writeWindow(phone: string, window: SessionWindow): Promise<void> {
+  await supabase.from("channel_state").upsert(
+    [{ key: sessionKey(phone), value: window, updated_at: new Date().toISOString() }],
+    { onConflict: "key" },
+  );
+}
+
+async function hasPendingRequests(phone: string): Promise<boolean> {
+  const { data } = await supabase
+    .from("channel_state")
+    .select("value")
+    .eq("key", pendingInputKey(phone))
+    .maybeSingle();
+  const requests = (data?.value as { requests?: PendingRequest[] } | null)?.requests;
+  return Array.isArray(requests) && requests.length > 0;
+}
+
+/**
+ * The continuation token for this phone's current conversation window, marking
+ * activity as a side effect. Pass `{ rotate: false }` for read-only lookups
+ * (the resolve-input repair path) so inspecting a session can never move it.
+ *
+ * Never throws: if the state store is unreachable we fall back to the bare
+ * phone number. A degraded window is survivable; a dropped text is not.
+ */
+export async function sessionToken(phone: string, opts?: { rotate?: boolean }): Promise<string> {
+  const rotate = opts?.rotate !== false;
+  try {
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+    const { data } = await supabase
+      .from("channel_state")
+      .select("value")
+      .eq("key", sessionKey(phone))
+      .maybeSingle();
+    const window = (data?.value as SessionWindow | null) ?? null;
+
+    if (!window) {
+      if (rotate) await writeWindow(phone, { epoch: 0, startedAt: nowIso, lastActivityAt: nowIso });
+      return phone;
+    }
+    if (!rotate) return tokenFor(phone, window.epoch);
+
+    const age = now - Date.parse(window.startedAt);
+    const idle = now - Date.parse(window.lastActivityAt);
+    if (age >= MAX_WINDOW_AGE_MS && idle >= IDLE_BEFORE_ROTATE_MS && !(await hasPendingRequests(phone))) {
+      const epoch = window.epoch + 1;
+      await writeWindow(phone, { epoch, startedAt: nowIso, lastActivityAt: nowIso });
+      console.log(`[sendblue] rotated conversation window → epoch ${epoch}`);
+      return tokenFor(phone, epoch);
+    }
+
+    await writeWindow(phone, { ...window, lastActivityAt: nowIso });
+    return tokenFor(phone, window.epoch);
+  } catch (err) {
+    console.warn("[sendblue] session window lookup failed; using bare phone token", err);
+    return phone;
+  }
 }
 
 // Mirrors eve's follow-up matcher (option id, label, or 1-based index,
@@ -144,7 +238,9 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       const phone = process.env.OWNER_PHONE;
       if (!phone) return Response.json({ error: "OWNER_PHONE not set" }, { status: 500 });
 
-      const active = await resolveActiveSession({ continuationToken: phone });
+      // rotate:false — this is the repair path; inspecting must not move the window.
+      const repairToken = await sessionToken(phone, { rotate: false });
+      const active = await resolveActiveSession({ continuationToken: repairToken });
       if (!active) return Response.json({ error: "no active session" }, { status: 404 });
       const session = getSession(active.sessionId);
 
@@ -168,7 +264,7 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       const responses = latest.map((r) => ({ requestId: r.requestId, optionId: option }));
       await send(
         { inputResponses: responses },
-        { auth: sendblueAuth(phone), continuationToken: phone, state: { phone } },
+        { auth: sendblueAuth(phone), continuationToken: repairToken, state: { phone } },
       );
       await clearPendingRequests(phone).catch(() => {});
       return Response.json({ resolved: responses });
@@ -218,7 +314,11 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       waitUntil(
         (async () => {
           const context = [`Current New York time: ${nowInOwnerTz()}.`];
-          const options = { auth: sendblueAuth(phone), continuationToken: phone, state: { phone } };
+          const options = {
+            auth: sendblueAuth(phone),
+            continuationToken: await sessionToken(phone),
+            state: { phone },
+          };
           const responses = await matchPendingResponses(phone, content).catch(() => []);
           if (responses.length > 0) {
             await send({ inputResponses: responses, context }, options);
@@ -238,7 +338,9 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
     const context = [`Current New York time: ${nowInOwnerTz()}.`];
     const options = {
       auth: input.auth ?? sendblueAuth(phone),
-      continuationToken: phone,
+      // Schedule-initiated messages (reminders, flight alerts) land in the same
+      // window as the owner's texts, and count as activity like any other turn.
+      continuationToken: await sessionToken(phone),
       state: { phone },
     };
     if (typeof input.message === "string") {
