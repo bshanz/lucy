@@ -74,6 +74,16 @@ function wallClockInTz(date: Date, timeZone: string): {
 }
 
 /**
+ * The current hour (0-23) in the owner's timezone. Vercel evaluates cron in UTC
+ * with no DST, so a schedule that must land at a civil hour runs hourly and
+ * gates on this instead of hardcoding a UTC hour that drifts twice a year — and
+ * that would be plain wrong for any non-US value of OWNER_TIMEZONE.
+ */
+export function ownerLocalHour(): number {
+  return wallClockInTz(new Date(), ownerTimezone()).hour;
+}
+
+/**
  * Convert a wall-clock time in the owner's timezone to a UTC Date, handling
  * DST correctly. Accepts "YYYY-MM-DDTHH:mm" or "YYYY-MM-DDTHH:mm:ss".
  * The model never does offset math — it just passes the time the owner said.

@@ -25,6 +25,7 @@ Built on [eve](https://vercel.com/docs) (Vercel's durable-agent framework), [Sen
 - **Gmail** - search, read (quoted-history stripped), and send/reply. Sends are **always approval-gated**, and email content is treated as untrusted input (the persona explicitly refuses instructions embedded in emails).
 - **Google Calendar + Tasks** - list/create events, manage the default task list. One OAuth grant covers all three Google services.
 - **Memory + diary** - durable facts (`remember`) and timestamped moments (`log_moment`) in separate stores, both recallable conversationally ("what did I do last weekend?").
+- **Flight price tracking** - price any route on demand, or watch up to 6 and get texted unprompted when a fare is genuinely notable. Google Flights (via SerpAPI) returns its own `typical_price_range` in the same call, so "is $613 good for this route?" is answerable on the *first* check with no accumulated history. Alerts are edge-triggered, not level-triggered: a fare parked below the typical range texts you once, not every day for six weeks.
 - **Single-owner security model** - the only trusted iMessage sender is `OWNER_PHONE`; the only trusted Slack user is `OWNER_SLACK_USER_ID`. Everyone else is dropped in code before the model ever sees the message.
 
 ## Architecture
@@ -35,13 +36,16 @@ Slack    ⇄ Vercel Connect–brokered webhooks          │
                                                      ▼
                               eve durable sessions (one per conversation)
                                         │
-        ┌───────────────┬───────────────┼──────────────────┐
-        ▼               ▼               ▼                  ▼
-   reminders ◄─┐    memories        moments       Google APIs (Gmail/
-   (Supabase)  │   (Supabase)      (Supabase)     Calendar/Tasks) via
-               │                                  Vercel Connect grant
-   reminder-poll cron: delivers due reminders,
-   sends 24h follow-ups, steps recurrences
+        ┌───────────────┬───────────────┼──────────────┬───────────────┐
+        ▼               ▼               ▼              ▼               ▼
+   reminders ◄─┐    memories        moments    Google APIs      flight_watches
+   (Supabase)  │   (Supabase)      (Supabase)  (Gmail/Cal/       (Supabase) ◄─┐
+               │                               Tasks) via                     │
+   reminder-poll cron: delivers due reminders, Vercel Connect                  │
+   sends 24h follow-ups, steps recurrences                                     │
+                                                                               │
+   flight-poll cron: hourly, acts at 9am owner-local; expires stale watches, ──┘
+   claims each row before spending a metered SerpAPI search, alerts on edges
 ```
 
 Design decisions worth knowing about (they're where the bugs live):
@@ -210,6 +214,7 @@ The webhook and the poller share the same dedupe table, so they safely coexist -
 | Supabase | free tier works; ~$10/mo on paid orgs |
 | Vercel | Pro required for 1-minute crons |
 | Vercel Connect | $3 per 10,000 token requests (pennies at personal scale) |
+| SerpAPI (flights) | free tier = 250 searches/mo; 6 watches ≈ 186, leaving ~64 for questions. $25/mo for 1,000 |
 | Model usage | via AI Gateway; a few $/mo for personal traffic |
 
 ## Security model
@@ -234,8 +239,9 @@ agent/
   schedules/
     sendblue-poll.ts     # fast-poll ingress: 5 passes × 10s per minute-cron
     reminder-poll.ts     # delivers due reminders + 24h follow-ups
-  tools/                 # reminders, memory, diary, gmail, calendar, tasks
-  lib/                   # sendblue/gmail clients, tz math, supabase, formatting
+    flight-poll.ts       # daily flight price checks, quota-aware, edge-triggered
+  tools/                 # reminders, memory, diary, gmail, calendar, tasks, flights
+  lib/                   # sendblue/gmail/serpapi clients, tz math, supabase, formatting
 scripts/
   authorize-gmail.mjs    # mints the dev-environment Google grant
 supabase/migrations/     # schema
