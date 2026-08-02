@@ -19,7 +19,7 @@ Built on [eve](https://vercel.com/docs) (Vercel's durable-agent framework), [Sen
 
 ## Features
 
-- **iMessage channel** - text a number, get an assistant. Free Sendblue sandbox works (fast-polling ingress, ~10–20s replies, typing indicators, Unicode-bold rendering since iMessage has no markdown). A dormant webhook route is included for Sendblue's paid plan (~5s replies) - flipping over is one CLI command.
+- **iMessage channel** - text a number, get an assistant. Free Sendblue sandbox works (fast-polling ingress, ~10–20s replies, read receipts, typing indicators, Unicode-bold rendering since iMessage has no markdown). A dormant webhook route is included for Sendblue's paid plan (~5s replies) - flipping over is one CLI command.
 - **Slack channel** - instant DMs via eve's built-in Slack channel; human-in-the-loop approvals render as real buttons.
 - **Reminders with follow-through** - natural language in, DST-proof scheduling out (`daily`, `weekly`, `weekdays`, `monthly`, `every_N_days`). One-off reminders stay open until you confirm; 24h of silence earns you exactly one nudge, and "push it to Friday" reschedules conversationally.
 - **Gmail** - search, read (quoted-history stripped), and send/reply. Sends are **always approval-gated**, and email content is treated as untrusted input (the persona explicitly refuses instructions embedded in emails).

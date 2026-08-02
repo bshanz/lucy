@@ -5,7 +5,7 @@ import type { SessionAuthContext } from "eve/context";
 import { gmailConnectorUid, OWNER_SUBJECT, ownerEmailAddress } from "#lib/gmail.js";
 import { toImessageText } from "#lib/imessage-format.js";
 import { nowInOwnerTz } from "#lib/reminders.js";
-import { sendMessage, sendTypingIndicator } from "#lib/sendblue.js";
+import { markRead, sendMessage, sendTypingIndicator } from "#lib/sendblue.js";
 import { supabase } from "#lib/supabase.js";
 
 /**
@@ -283,6 +283,7 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
 
       const body = (await req.json().catch(() => null)) as {
         from_number?: string;
+        to_number?: string;
         content?: string;
         is_outbound?: boolean;
         message_handle?: string;
@@ -316,6 +317,8 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       const content = body.content;
       waitUntil(
         (async () => {
+          // Claimed above, so the receipt is honest: Lucy has this one.
+          await markRead(phone, body.to_number).catch(() => {});
           const context = [`Current New York time: ${nowInOwnerTz()}.`];
           const options = {
             auth: sendblueAuth(phone),

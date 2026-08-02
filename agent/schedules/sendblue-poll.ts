@@ -1,7 +1,7 @@
 import { defineSchedule } from "eve/schedules";
 import type { ScheduleHandlerArgs } from "eve/schedules";
 import sendblue, { sendblueAuth } from "#channels/sendblue.js";
-import { fetchRecentInbound, messageKey, sendTypingIndicator } from "#lib/sendblue.js";
+import { fetchRecentInbound, markRead, messageKey, sendTypingIndicator } from "#lib/sendblue.js";
 import { supabase } from "#lib/supabase.js";
 
 /**
@@ -52,8 +52,12 @@ async function pollOnce(receive: ScheduleHandlerArgs["receive"], owner: string):
   const fresh = candidates.filter((m) => claimedIds.has(messageKey(m)));
   if (fresh.length === 0) return;
 
-  // Show "typing…" the moment a message is claimed — dispatch plus workflow
-  // spin-up adds seconds before turn.started would send it.
+  // Read receipt, then "typing…", the moment a message is claimed — the human
+  // iMessage rhythm (Read → typing → reply), and dispatch plus workflow
+  // spin-up adds seconds before turn.started would send the indicator itself.
+  // `to_number` is the Sendblue line the owner texted, which is what mark-read
+  // wants as from_number when SENDBLUE_FROM_NUMBER isn't configured.
+  await markRead(owner, fresh[0].to_number).catch(() => {});
   await sendTypingIndicator(owner).catch(() => {});
 
   // Dispatch one at a time, in order — sequential awaits never race the park

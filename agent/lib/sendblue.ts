@@ -5,6 +5,9 @@
  *  - POST /api/send-message            { number, content, from_number?, media_url? }
  *  - GET  /api/v2/messages?...         → { data: SendblueMessage[], pagination: { total, hasMore } }
  *
+ * Verified against docs.sendblue.com only (not present in the CLI):
+ *  - POST /api/mark-read               { number, from_number }   // both required
+ *
  * Env is read lazily — eve imports modules during discovery without secrets.
  */
 
@@ -73,6 +76,38 @@ export async function sendTypingIndicator(number: string): Promise<void> {
   // Best-effort: a failed indicator should never break the turn.
   if (!res.ok) {
     console.warn(`[sendblue] typing indicator failed (${res.status})`);
+  }
+}
+
+/**
+ * Mark the conversation with `number` as read — the blue "Read 9:41 AM" line
+ * under the owner's last text.
+ *
+ * Call this AFTER the message is claimed, never before: a read receipt is a
+ * promise that Lucy has the message and is answering it, so it must not fire
+ * for a text that a crashed dispatch will hand back to a later pass. (Sendblue
+ * also offers account-level auto mark-read, which fires at their ingress and
+ * can't make that guarantee — hence doing it here.)
+ *
+ * `from_number` is REQUIRED by this endpoint (unlike send-message, where it's
+ * optional), so fall back to the line the inbound message was addressed to.
+ * iMessage/RCS only — a no-op on SMS, and never confirmed by the recipient.
+ */
+export async function markRead(number: string, fromNumber?: string): Promise<void> {
+  const from = process.env.SENDBLUE_FROM_NUMBER || fromNumber;
+  if (!from) {
+    console.warn("[sendblue] mark-read skipped: no from_number available");
+    return;
+  }
+  const res = await fetch(`${API_BASE}/api/mark-read`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ number, from_number: from }),
+  });
+  // Best-effort, exactly like the typing indicator: a missing receipt is
+  // cosmetic, and must never cost the owner a reply.
+  if (!res.ok) {
+    console.warn(`[sendblue] mark-read failed (${res.status})`);
   }
 }
 
