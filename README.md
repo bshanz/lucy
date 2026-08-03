@@ -21,7 +21,7 @@ Built on [eve](https://vercel.com/docs) (Vercel's durable-agent framework), [Sen
 
 - **iMessage channel** - text a number, get an assistant. Free Sendblue sandbox works (fast-polling ingress, ~10–20s replies, read receipts, typing indicators, Unicode-bold rendering since iMessage has no markdown). A dormant webhook route is included for Sendblue's paid plan (~5s replies) - flipping over is one CLI command.
 - **Slack channel** - instant DMs via eve's built-in Slack channel; human-in-the-loop approvals render as real buttons.
-- **Reminders with follow-through** - natural language in, DST-proof scheduling out (`daily`, `weekly`, `weekdays`, `monthly`, `every_N_days`). One-off reminders stay open until you confirm; 24h of silence earns you exactly one nudge, and "push it to Friday" reschedules conversationally.
+- **Reminders with follow-through** - natural language in, DST-proof scheduling out (`daily`, `weekly`, `weekdays`, `monthly`, `every_N_days`). One-off reminders stay open until you confirm; silence earns up to three nudges on a widening curve (a day, then three days, then a week, the last one announced as the last, all clamped to waking hours), after which the reminder stops chasing you but stays on your list. "Push it to Friday" reschedules conversationally and restarts the cycle.
 - **Gmail** - search, read (quoted-history stripped), and send/reply. Sends are **always approval-gated**, and email content is treated as untrusted input (the persona explicitly refuses instructions embedded in emails).
 - **Google Calendar + Tasks** - list/create events, manage the default task list. One OAuth grant covers all three Google services.
 - **Memory + diary** - durable facts (`remember`) and timestamped moments (`log_moment`) in separate stores, both recallable conversationally ("what did I do last weekend?").
@@ -42,7 +42,7 @@ Slack    ⇄ Vercel Connect–brokered webhooks          │
    (Supabase)  │   (Supabase)      (Supabase)  (Gmail/Cal/       (Supabase) ◄─┐
                │                               Tasks) via                     │
    reminder-poll cron: delivers due reminders, Vercel Connect                  │
-   sends 24h follow-ups, steps recurrences                                     │
+   sends escalating follow-ups, steps recurrences                              │
                                                                                │
    flight-poll cron: hourly, acts at 9am owner-local; expires stale watches, ──┘
    claims each row before spending a metered SerpAPI search, alerts on edges
@@ -78,8 +78,8 @@ requirements - each one is a silent-failure mode someone already hit:
    committed files.
 2. Install deps; copy .env.example to .env.local and fill in what you know.
    Generate LUCY_AGENT_SECRET with `openssl rand -hex 32`.
-3. Supabase: create a project (ask me to approve any cost), apply
-   supabase/migrations/0001_init.sql, collect the URL + sb_secret_ key.
+3. Supabase: create a project (ask me to approve any cost), apply every file in
+   supabase/migrations/ in filename order, collect the URL + sb_secret_ key.
 4. Sendblue: `npm i -g @sendblue/cli`, then `sendblue setup --phone <my
    number> --no-wait`. Relay the verification phrase; I'll text it from my
    phone; poll `sendblue setup --check` until it lands. Then `sendblue
@@ -127,7 +127,7 @@ cp .env.example .env.local
 
 ### 2. Supabase
 
-Create a project, run `supabase/migrations/0001_init.sql` in the SQL editor, and put the project URL + **secret key** (`sb_secret_...`, Project Settings → API keys) in `.env.local`.
+Create a project, run every file in `supabase/migrations/` in filename order in the SQL editor, and put the project URL + **secret key** (`sb_secret_...`, Project Settings → API keys) in `.env.local`. `0001_init.sql` alone isn't enough — the later migrations add flight tracking and the reminder follow-up columns, and the crons will fail at runtime without them.
 
 ### 3. Sendblue (iMessage)
 
@@ -238,7 +238,7 @@ agent/
     eve.ts               # default HTTP channel (dev UI)
   schedules/
     sendblue-poll.ts     # fast-poll ingress: 5 passes × 10s per minute-cron
-    reminder-poll.ts     # delivers due reminders + 24h follow-ups
+    reminder-poll.ts     # delivers due reminders + escalating follow-ups
     flight-poll.ts       # daily flight price checks, quota-aware, edge-triggered
   tools/                 # reminders, memory, diary, gmail, calendar, tasks, flights
   lib/                   # sendblue/gmail/serpapi clients, tz math, supabase, formatting

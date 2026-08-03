@@ -10,12 +10,40 @@ export interface ReminderRow {
   body: string;
   fire_at: string;
   recurrence: string | null; // daily | weekly | weekdays | monthly | every_N_days
-  status: "pending" | "sending" | "sent" | "cancelled";
+  // 'lapsed' = fired, never confirmed, out of nudges. Still on the books.
+  status: "pending" | "sending" | "sent" | "done" | "cancelled" | "lapsed";
+  follow_up_count: number;
+  next_follow_up_at: string | null;
   created_at: string;
   sent_at: string | null;
 }
 
 const EVERY_N_DAYS = /^every_(\d{1,3})_days$/;
+
+/**
+ * Hours after a one-off fires at which nudges 1, 2 and 3 come due: a day, then
+ * three days, then a week. Cumulative offsets rather than deltas, so a
+ * deadline is a pure function of (sent_at, count) — which is what lets the poll
+ * recompute the deadline it nulled out when a dispatch fails, and what keeps
+ * the curve from drifting if a tick runs late.
+ *
+ * It terminates on purpose. Ignoring one nudge means the owner was busy;
+ * ignoring three means the thing is done-but-unconfirmed or no longer wanted,
+ * and a fourth only teaches him to ignore unprompted messages from Lucy in
+ * general — including the flight alerts that are engineered to be rare.
+ */
+const FOLLOW_UP_OFFSETS_H = [24, 72, 168];
+
+export const MAX_FOLLOW_UPS = FOLLOW_UP_OFFSETS_H.length;
+
+/**
+ * Nudges land in the owner-local window 8:00am–9:00pm, inclusive of both
+ * endpoints; 2am "did you ever call Alex?" is worse than not asking at all.
+ */
+const WAKING_START_HOUR = 8;
+const WAKING_END_HOUR = 21;
+
+const pad = (n: number) => String(n).padStart(2, "0");
 
 /** Validate a recurrence string; returns null if invalid. */
 export function parseRecurrence(r: string): string | null {
@@ -105,6 +133,47 @@ export function ownerWallClockToUtc(wall: string): Date | null {
     guess += target - rendered;
   }
   return new Date(guess);
+}
+
+/**
+ * Move an instant out of the owner-local quiet window, to whichever edge of it
+ * is nearer. Follow-ups are offset from whenever the reminder happened to fire,
+ * so without this a 10pm reminder nudges at 10pm, then 10pm, then 10pm.
+ *
+ * Nearer edge rather than always-forward, because always-forward turns a 1-hour
+ * conflict into a 10-hour delay: a 10pm deadline would slide to 8am the next
+ * morning and the "24h" nudge would arrive 34h after the reminder. Snapping to
+ * the nearer edge moves a deadline by at most half the quiet window (5.5h),
+ * and the gaps in the curve are 48h and 96h, so nudges can never reorder or
+ * land in the past.
+ */
+function toWakingHours(d: Date): Date {
+  const tz = ownerTimezone();
+  const w = wallClockInTz(d, tz);
+  if (w.hour >= WAKING_START_HOUR && w.hour < WAKING_END_HOUR) return d;
+
+  // Midpoint of the quiet window, which wraps midnight: 9pm + 5.5h = 2:30am.
+  const quietMidHour = (WAKING_END_HOUR + (WAKING_START_HOUR + 24 - WAKING_END_HOUR) / 2) % 24;
+  // Evening (>= 9pm) and the small hours (before 2:30am) are nearer the 9pm
+  // behind them; 2:30am–8am is nearer the 8am ahead.
+  const snapBack = w.hour >= WAKING_END_HOUR || w.hour < quietMidHour;
+  const dayShift = w.hour < WAKING_START_HOUR && snapBack ? -1 : 0;
+  const hour = snapBack ? WAKING_END_HOUR : WAKING_START_HOUR;
+
+  const day = new Date(Date.UTC(w.year, w.month - 1, w.day + dayShift));
+  const wall = `${day.getUTCFullYear()}-${pad(day.getUTCMonth() + 1)}-${pad(day.getUTCDate())}T${pad(hour)}:00`;
+  return ownerWallClockToUtc(wall) ?? d;
+}
+
+/**
+ * When nudge number `count + 1` comes due, or null once the curve is spent —
+ * the caller lapses the reminder at that point: no more outreach, still listed.
+ */
+export function nextFollowUpAt(sentAt: string, count: number): string | null {
+  const offsetH = FOLLOW_UP_OFFSETS_H[count];
+  if (offsetH === undefined) return null;
+  const due = new Date(new Date(sentAt).getTime() + offsetH * 3600 * 1000);
+  return toWakingHours(due).toISOString();
 }
 
 export function nextOccurrence(fireAt: string, recurrence: string): string {

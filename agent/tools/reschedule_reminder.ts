@@ -5,8 +5,9 @@ import { formatLocal, ownerWallClockToUtc, supabase } from "#lib/reminders.js";
 export default defineTool({
   description:
     "Move a reminder to a new time — works for upcoming reminders AND fired-but-unconfirmed " +
-    "ones (e.g. the owner says 'push it to Friday' after a follow-up). New York wall-clock time, " +
-    "no offset. Resets the follow-up cycle so he'll get nudged again 24h after the new fire.",
+    "ones (e.g. the owner says 'push it to Friday' after a follow-up) — including ones that " +
+    "already ran out of nudges. New York wall-clock time, no offset. Resets the follow-up cycle, " +
+    "so the full run of nudges starts over from the new fire time.",
   inputSchema: z.object({
     id: z.string().uuid().describe("The reminder id to reschedule"),
     fireAtLocal: z
@@ -28,11 +29,12 @@ export default defineTool({
       .update({
         fire_at: fireAt.toISOString(),
         status: "pending",
-        followed_up: false,
+        follow_up_count: 0,
+        next_follow_up_at: null,
         sent_at: null,
       })
       .eq("id", id)
-      .in("status", ["pending", "sent", "sending"])
+      .in("status", ["pending", "sent", "sending", "lapsed"])
       .select("id, body, fire_at")
       .maybeSingle();
     if (error) return { ok: false as const, error: error.message };
