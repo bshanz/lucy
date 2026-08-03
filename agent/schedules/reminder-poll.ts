@@ -76,9 +76,12 @@ export default defineSchedule({
       .select("*");
     if (error) throw new Error(`[reminder-poll] claim failed: ${error.message}`);
 
+    // Deliberately NOT an early return on an empty batch: the follow-up pass
+    // below is a separate query with its own schedule, and returning here would
+    // gate it on a reminder happening to come due in the very same minute. An
+    // empty loop is the correct no-op; only the log is worth suppressing.
     const due = (data ?? []) as ReminderRow[];
-    if (due.length === 0) return;
-    console.log(`[reminder-poll] delivering ${due.length} reminder(s)`);
+    if (due.length > 0) console.log(`[reminder-poll] delivering ${due.length} reminder(s)`);
 
     for (const reminder of due) {
       const prompt =
