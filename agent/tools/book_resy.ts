@@ -41,22 +41,21 @@ export default defineTool({
       // open, not for a drop race. resy-snipe.ts is what handles contention.
       const details = await slotDetails({ configToken, day: date, partySize });
 
-      if (!depositWithinBounds(details.depositCents, cap)) {
+      if (!depositWithinBounds(details.chargeCents, cap)) {
         return {
           ok: false as const,
           error:
-            `That table needs a ${formatUsd(details.depositCents)} deposit, which is over the ` +
-            `${formatUsd(cap)} you cleared. Nothing was booked. Tell the owner the exact amount ` +
-            `and ask whether to go ahead.`,
+            `That table costs ${details.chargeLabel ?? formatUsd(details.chargeCents)} ` +
+            `(${details.chargeType}), which is over the ${formatUsd(cap)} you cleared. Nothing ` +
+            `was booked. Tell the owner that exact amount and ask whether to go ahead.`,
         };
       }
 
       const result = await book({
         bookToken: details.bookToken,
-        // Only attach a card when Resy actually wants one. Sending it
-        // unconditionally is how a "free" reservation quietly becomes a charged
-        // one at venues that will take payment if offered.
-        paymentMethodId: details.depositCents > 0 ? details.paymentMethodId : null,
+        // Always, even at $0 — many venues need a card on file to hold a free
+        // table. See the warning on book() in #lib/resy.js.
+        paymentMethodId: details.paymentMethodId,
       });
 
       return {
@@ -68,7 +67,7 @@ export default defineTool({
         // Needed by cancel_resy_booking. Scoped to this one reservation — it
         // can release this table and nothing else.
         resyToken: result.resyToken,
-        depositPaid: details.depositCents > 0 ? formatUsd(details.depositCents) : null,
+        charged: details.chargeCents > 0 ? (details.chargeLabel ?? formatUsd(details.chargeCents)) : null,
       };
     } catch (err) {
       if (err instanceof ResyError) {
@@ -84,8 +83,11 @@ export default defineTool({
           return {
             ok: false as const,
             error:
-              "Resy wants a deposit for that table and there's no card on file it can use. " +
-              "Nothing was booked — he'll need to add a payment method in the Resy app.",
+              "Resy refused the booking over payment. Nothing was booked. Do NOT tell the owner " +
+              "he has no card on file unless resy_availability or list_resy_bookings actually " +
+              "says so — this usually means the venue wants a card it can charge for a no-show, " +
+              "and the card on the account was rejected or is expired. Ask him to check the card " +
+              "in the Resy app.",
           };
         }
         if (err.kind === "recaptcha") {

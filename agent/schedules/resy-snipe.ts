@@ -169,16 +169,18 @@ async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
       // The deposit cap is a hard bound from the approval card. Over it, this
       // slot is simply not authorized — skip to the next rather than abandoning
       // the snipe, since a cheaper table may sit one rank down.
-      if (!depositWithinBounds(details.depositCents, snipe.max_deposit_cents)) {
+      if (!depositWithinBounds(details.chargeCents, snipe.max_deposit_cents)) {
         lastReason =
-          `the tables that opened wanted a ${formatUsd(details.depositCents)} deposit, over the ` +
-          `${formatUsd(snipe.max_deposit_cents)} limit you set`;
+          `the tables that opened cost ${details.chargeLabel ?? formatUsd(details.chargeCents)} ` +
+          `(${details.chargeType}), over the ${formatUsd(snipe.max_deposit_cents)} limit you set`;
         continue;
       }
 
       const result = await book({
         bookToken: details.bookToken,
-        paymentMethodId: details.depositCents > 0 ? details.paymentMethodId : null,
+        // Always — a free table can still require a card on file, and a 402 at
+        // T-0 loses the reservation outright.
+        paymentMethodId: details.paymentMethodId,
         fast: true,
       });
 
@@ -187,7 +189,7 @@ async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
         slot,
         resyToken: result.resyToken,
         reservationId: result.reservationId,
-        depositCents: details.depositCents,
+        depositCents: details.chargeCents,
       };
     } catch (err) {
       if (err instanceof ResyError) {

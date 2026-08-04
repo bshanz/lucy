@@ -714,15 +714,55 @@ export async function findSlots(args: {
 // Booking
 // ---------------------------------------------------------------------------
 
+/**
+ * What a slot will actually charge, in CENTS, from a /3/details `payment` block.
+ *
+ * The single unit-conversion boundary in this codebase, and therefore worth its
+ * own function and its own tests. Resy reports these amounts in DOLLARS while
+ * everything here counts integer cents: Chef's Table at Brooklyn Fare returns
+ * `{price_per_unit: 200, quantity: 2, total: 400}` and renders it
+ * "$200.00 x 2 = $400.00". Read `total` as cents and a $400 prix fixe sails
+ * under a $50 cap.
+ *
+ * `total` already includes quantity, fees and tax — do NOT multiply by party
+ * size. `reservation_charge` is the fallback for payloads that omit `total`.
+ */
+export function chargeCentsFrom(payment: any): number {
+  const amounts = payment?.amounts;
+  if (!amounts) return 0;
+  const dollars = Number(amounts.total ?? amounts.reservation_charge ?? 0);
+  if (!Number.isFinite(dollars) || dollars <= 0) return 0;
+  return Math.round(dollars * 100);
+}
+
 export type SlotDetails = {
   /** Short-lived (~5 min). The actual right to book. */
   bookToken: string;
-  /** Cents. 0 when no card is required. */
-  depositCents: number;
+  /** What booking this will actually CHARGE, in cents. 0 for an ordinary table. */
+  chargeCents: number;
+  /** Resy's own words: "free", "prix fixe", "deposit", … */
+  chargeType: string;
+  /** Resy's own rendering, e.g. "$200.00 x 2 = $400.00". Quote this, don't recompute it. */
+  chargeLabel: string | null;
+  /** The account's default card, or null if there genuinely isn't one. */
   paymentMethodId: number | null;
+  hasCardOnFile: boolean;
 };
 
-/** Resolve a slot into a book_token, plus whatever deposit Resy attaches to it. */
+/**
+ * Resolve a slot into a book_token, plus what booking it will really cost.
+ *
+ * ⚠️ AMOUNTS ARE IN DOLLARS, NOT CENTS. Verified against Chef's Table at
+ * Brooklyn Fare, which returns `price_per_unit: 200, quantity: 2, total: 400`
+ * alongside the label "$200.00 x 2 = $400.00". Everything else in this codebase
+ * counts money in integer cents, so this is the one conversion boundary — get it
+ * backwards and a $400 prix fixe reads as $4.
+ *
+ * ⚠️ There is NO `deposit_fee` field. An earlier version read
+ * `config.deposit_fee`, which does not exist on any response, so every venue
+ * priced as free and the owner's deposit cap was never enforced at all. The
+ * charge lives at `payment.amounts.total`, and `payment.config.type` names it.
+ */
 export async function slotDetails(args: {
   configToken: string;
   day: string;
@@ -738,18 +778,19 @@ export async function slotDetails(args: {
   const bookToken = body?.book_token?.value;
   if (!bookToken) throw new ResyError("Resy didn't return a booking token for that slot", "gone");
 
-  // Resy expresses the deposit in a few shapes depending on venue config.
-  const raw =
-    body?.config?.deposit_fee ?? body?.payment?.deposit_fee ?? body?.user?.deposit_fee ?? 0;
-  const depositCents = Math.round(Number(raw) || 0);
+  const chargeCents = chargeCentsFrom(body?.payment);
 
-  const paymentMethodId =
-    body?.user?.payment_methods?.[0]?.id ?? body?.payment_methods?.[0]?.id ?? null;
+  // Prefer the card the owner actually made default rather than array order.
+  const methods: any[] = body?.user?.payment_methods ?? body?.payment_methods ?? [];
+  const chosen = methods.find((m) => m?.is_default) ?? methods[0] ?? null;
 
   return {
     bookToken: String(bookToken),
-    depositCents,
-    paymentMethodId: paymentMethodId == null ? null : Number(paymentMethodId),
+    chargeCents,
+    chargeType: String(body?.payment?.config?.type ?? "unknown"),
+    chargeLabel: body?.payment?.display?.buy?.value || null,
+    paymentMethodId: chosen?.id == null ? null : Number(chosen.id),
+    hasCardOnFile: chosen != null,
   };
 }
 
@@ -764,6 +805,16 @@ export type Booking = {
  * Form-encoded, not JSON — Resy's /3/book rejects a JSON body. The payment
  * method rides along as a JSON-in-a-form-field, which is unusual enough to look
  * like a bug and isn't.
+ *
+ * ⚠️ ALWAYS PASS THE CARD WHEN THE ACCOUNT HAS ONE, even for a $0 table. Plenty
+ * of venues require a card ON FILE to hold a free reservation — they charge only
+ * for a no-show — and Resy answers a missing `struct_payment_method` with a bare
+ * 402 that is indistinguishable from a real deposit demand. An earlier version
+ * attached the card only when it believed a deposit was due, so those venues
+ * failed to book and reported "no card on file" at an owner who had two.
+ *
+ * Attaching a card does not authorise a charge: the amount is fixed by the
+ * booking config (see slotDetails), which is where the owner's cap is enforced.
  */
 export async function book(args: {
   bookToken: string;

@@ -16,6 +16,7 @@
  * error — it just loses, quietly, and the fall-back DST day is exactly when.
  */
 import {
+  chargeCentsFrom,
   computeDropAt,
   depositWithinBounds,
   dropAtForBookingWindow,
@@ -155,6 +156,46 @@ check("any deposit refused when cap is zero", depositWithinBounds(1, 0), false);
 check("deposit exactly at the cap is authorised", depositWithinBounds(5000, 5000), true);
 check("one cent over the cap is refused", depositWithinBounds(5001, 5000), false);
 check("well under the cap", depositWithinBounds(2500, 5000), true);
+
+// ---------------------------------------------------------------------------
+// chargeCentsFrom — the one unit boundary, using real captured payloads
+// ---------------------------------------------------------------------------
+//
+// Resy reports money in DOLLARS; everything here counts cents. Reading `total`
+// as cents makes a $400 prix fixe look like $4 and walk straight through a $50
+// cap — a silent overspend of the owner's money, which is the worst failure this
+// feature can have. Both payloads below are copied verbatim from live responses.
+
+// Chef's Table at Brooklyn Fare, party of 2, rendered "$200.00 x 2 = $400.00".
+const brooklynFare = {
+  amounts: {
+    reservation_charge: 400, subtotal: 400, add_ons: 0, quantity: 2,
+    resy_fee: 0, service_fee: 0, tax: 0, total: 400, surcharge: 0, price_per_unit: 200,
+  },
+  config: { type: "prix fixe" },
+};
+// The Garage — an ordinary free table that still demands a card on file.
+const freeTable = {
+  amounts: {
+    items: [], reservation_charge: 0, subtotal: 0, add_ons: 0, quantity: 2,
+    resy_fee: 0, service_fee: 0, tax: 0, total: 0, surcharge: 0, price_per_unit: 0,
+  },
+  config: { type: "free" },
+};
+
+check("$400 prix fixe reads as 40000 cents, not 400", chargeCentsFrom(brooklynFare), 40_000);
+check("a free table is zero", chargeCentsFrom(freeTable), 0);
+check("total already includes quantity — no multiplying by party size", chargeCentsFrom(brooklynFare), 200 * 2 * 100);
+check("missing payment block is zero, not NaN", chargeCentsFrom(undefined), 0);
+check("missing amounts is zero", chargeCentsFrom({ config: { type: "free" } }), 0);
+check("falls back to reservation_charge when total is absent", chargeCentsFrom({ amounts: { reservation_charge: 25 } }), 2_500);
+check("garbage is zero, never NaN", chargeCentsFrom({ amounts: { total: "abc" } }), 0);
+check("fractional dollars round to whole cents", chargeCentsFrom({ amounts: { total: 12.345 } }), 1_235);
+
+// A $400 charge must NOT pass a $50 cap. This is the composed failure the two
+// bugs would have produced together: no deposit parsed, so no cap enforced.
+check("the $400 prix fixe is refused by a $50 cap", depositWithinBounds(chargeCentsFrom(brooklynFare), 5_000), false);
+check("the free table passes a zero cap", depositWithinBounds(chargeCentsFrom(freeTable), 0), true);
 
 // ---------------------------------------------------------------------------
 // sessionExpiresAt — which clock actually governs
