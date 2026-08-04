@@ -1,22 +1,14 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
+import type { GcalEvent } from "#lib/calendar.js";
 import { googleApiFetch } from "#lib/gmail.js";
 import { formatLocal, ownerTimezone, ownerWallClockToUtc } from "#lib/reminders.js";
-
-interface GcalEvent {
-  id: string;
-  summary?: string;
-  location?: string;
-  start?: { dateTime?: string; date?: string };
-  end?: { dateTime?: string; date?: string };
-  attendees?: Array<{ email?: string; responseStatus?: string }>;
-  hangoutLink?: string;
-}
 
 export default defineTool({
   description:
     "List events on the owner's Google Calendar in a New York local-time window. Defaults to " +
-    "the next 7 days. Times in and out are NY wall-clock (no offsets).",
+    "the next 7 days. Times in and out are NY wall-clock (no offsets). Each event carries its " +
+    "id (pass it to update_calendar_event) and its guests with their RSVP status.",
   inputSchema: z.object({
     fromLocal: z
       .string()
@@ -58,6 +50,9 @@ export default defineTool({
         allDay: !e.start?.dateTime,
         location: e.location,
         meetLink: e.hangoutLink,
+        attendees: e.attendees
+          ?.filter((a) => a.email)
+          .map((a) => ({ email: a.email, status: a.responseStatus })),
       })),
     };
   },

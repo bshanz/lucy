@@ -23,7 +23,7 @@ Built on [eve](https://vercel.com/docs) (Vercel's durable-agent framework), [Sen
 - **Slack channel** - instant DMs via eve's built-in Slack channel; human-in-the-loop approvals render as real buttons.
 - **Reminders with follow-through** - natural language in, DST-proof scheduling out (`daily`, `weekly`, `weekdays`, `monthly`, `every_N_days`). One-off reminders stay open until you confirm; silence earns up to three nudges on a widening curve (a day, then three days, then a week, the last one announced as the last, all clamped to waking hours), after which the reminder stops chasing you but stays on your list. "Push it to Friday" reschedules conversationally and restarts the cycle.
 - **Gmail** - search, read (quoted-history stripped), and send/reply. Sends are **always approval-gated**, and email content is treated as untrusted input (the persona explicitly refuses instructions embedded in emails).
-- **Google Calendar + Tasks** - list/create events, manage the default task list. One OAuth grant covers all three Google services.
+- **Google Calendar + Tasks** - list, create, and update events, manage the default task list. One OAuth grant covers all three Google services. Events can carry **guests**: pass attendees and Google sends the real invitations, and adding, removing, or rescheduling anyone lands behind an approval card first, since every one of those actions mails a person who isn't you. Solo events stay unprompted. Lucy will not invent an address to invite - she resolves it from memory or your Gmail, or asks.
 - **Memory + diary** - durable facts (`remember`) and timestamped moments (`log_moment`) in separate stores, both recallable conversationally ("what did I do last weekend?").
 - **Flight price tracking** - price any route on demand, or watch up to 6 and get texted unprompted when a fare is genuinely notable. Google Flights (via SerpAPI) returns its own `typical_price_range` in the same call, so "is $613 good for this route?" is answerable on the *first* check with no accumulated history. Alerts are edge-triggered, not level-triggered: a fare parked below the typical range texts you once, not every day for six weeks.
 - **Restaurant reservations (Resy)** - search, check availability, book, and cancel on your own Resy account. The real feature is **sniping**: hard tables drop at an exact second weeks in advance and are gone in under ten, which is far less time than an approval round-trip over iMessage. So you approve the *watch*, not the booking - venue, date, party size, time window, deposit cap - and at the drop moment Lucy books unattended inside those bounds and texts you the result, win or lose. The time window is a hard bound, not a preference: a table outside it is one you never authorised. Venue constraints are checked at arm time rather than discovered at T-0, because some venues gate booking behind a reCAPTCHA (this varies *between locations of the same restaurant* - Carbone NYC can be sniped, Carbone Miami can't) and arming a snipe that was never going to work is worse than refusing it. You link the account **by conversation, not by config**: Resy signs in with a texted code, so you say "connect resy", she has Resy text your phone, and you text the six digits back. That session lasts ~45 days and, on a code-linked account, genuinely cannot renew itself - Resy issues no refresh token - so Lucy watches the clock and nudges you at 7, 3 and 1 days out rather than letting a snipe discover it at 9am on drop day.
@@ -181,7 +181,7 @@ Add every var from `.env.local` to the Vercel project's production env (⚠️ u
 **Vercel dashboard → Connect** → add an **OAuth** connector with your own credentials:
 - Authorization endpoint: `https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent` - ⚠️ without those two params Google never issues a refresh token and everything dies after ~1 hour.
 - Token endpoint: `https://oauth2.googleapis.com/token`
-- Settings → Grant Types: **User Authorization ON** with scopes `.../auth/gmail.modify`, `.../auth/calendar`, `.../auth/tasks`; **Refresh Tokens ON**.
+- Settings → Grant Types: **User Authorization ON** with scopes `.../auth/gmail.modify`, `.../auth/calendar`, `.../auth/tasks`; **Refresh Tokens ON**. (`.../auth/calendar` is full read/write and already covers sending invites - guests need no extra scope and no re-consent.)
 - Link the connector to your Vercel project, copy the **UID** (⚠️ the UID, e.g. `accounts.google.com/my-connector` - not the display name) → `GMAIL_CONNECTOR_UID`.
 
 **Create the grants** - ⚠️ Connect buckets grants **per environment**; a laptop-created grant is invisible to production, so you need one of each:
@@ -218,6 +218,7 @@ Nothing to configure. Resy signs in with a texted code, so you link it by talkin
 Verify without booking anything:
 
 ```bash
+npx tsx scripts/check-calendar-logic.ts                      # guest-list logic, no network
 npx tsx scripts/check-resy-logic.ts                          # pure logic, no network
 npx tsx --env-file=.env.local scripts/check-resy-claim.ts    # no double-booking
 npx tsx --env-file=.env.local scripts/check-resy-live.ts     # live, stops before /3/book
@@ -287,10 +288,12 @@ agent/
   tools/                 # reminders, memory, diary, gmail, calendar, tasks,
                          #   flights, resy (search/availability/book/snipe/cancel)
   lib/                   # sendblue/gmail/serpapi/resy clients, tz math, supabase,
-                         #   formatting; resy.ts also holds the pure ranking logic
+                         #   formatting; resy.ts also holds the pure ranking logic,
+                         #   calendar.ts the guest-list merge rules
 scripts/
   authorize-gmail.mjs    # mints the dev-environment Google grant
   connect-resy.ts        # links Resy from the CLI (--send is opt-in; it texts you)
+  check-calendar-logic.ts # pure checks: guest-list normalise/merge, duration on a move
   check-resy-logic.ts    # pure checks: slot ranking, deposit cap, DST, unit boundary
   check-resy-claim.ts    # proves two concurrent crons can't double-book a table
   check-resy-live.ts     # live ladder; stops before /3/book on purpose

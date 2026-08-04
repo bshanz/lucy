@@ -1,13 +1,14 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import { googleApiFetch } from "#lib/gmail.js";
+import { insertEvent, normalizeAttendees } from "#lib/calendar.js";
 import { formatLocal, ownerTimezone, ownerWallClockToUtc } from "#lib/reminders.js";
 
 export default defineTool({
   description:
     "Create an event on the owner's Google Calendar. Times are NY wall-clock (no offsets) — " +
-    "the tool handles the timezone. Personal events only (no attendees/invites in v1). " +
-    "Confirm the returned localTime back to the owner.",
+    "the tool handles the timezone. Pass `attendees` to invite people: Google emails them a " +
+    "real invitation, so that path REQUIRES the owner's approval and he sees the guest list " +
+    "first. Confirm the returned localTime back to the owner.",
   inputSchema: z.object({
     title: z.string().min(1),
     startLocal: z.string().min(1).describe("Start, NY local time YYYY-MM-DDTHH:mm"),
@@ -17,8 +18,21 @@ export default defineTool({
       .describe("End, NY local time YYYY-MM-DDTHH:mm; defaults to one hour after start"),
     description: z.string().optional(),
     location: z.string().optional(),
+    attendees: z
+      .array(z.string().email())
+      .max(20)
+      .optional()
+      .describe(
+        "Guests to invite, as real email addresses you have actually resolved — never " +
+          "guess one from a name. Omit for a personal event. The owner's own address is " +
+          "dropped automatically; he's the organizer.",
+      ),
   }),
-  async execute({ title, startLocal, endLocal, description, location }) {
+  // Solo events stay frictionless; the moment the call would land in somebody
+  // else's inbox the owner sees an approval card with the guest list on it.
+  approval: ({ toolInput }) =>
+    (toolInput?.attendees?.length ?? 0) > 0 ? "user-approval" : "not-applicable",
+  async execute({ title, startLocal, endLocal, description, location, attendees }) {
     const start = ownerWallClockToUtc(startLocal);
     if (!start) return { ok: false as const, error: "startLocal must be YYYY-MM-DDTHH:mm" };
     const end = endLocal
@@ -26,18 +40,17 @@ export default defineTool({
       : new Date(start.getTime() + 3600 * 1000);
     if (!end) return { ok: false as const, error: "endLocal must be YYYY-MM-DDTHH:mm" };
 
-    const created = await googleApiFetch<{ id: string; htmlLink?: string }>(
-      "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+    const guests = normalizeAttendees(attendees);
+    const created = await insertEvent(
       {
-        method: "POST",
-        body: JSON.stringify({
-          summary: title,
-          description,
-          location,
-          start: { dateTime: start.toISOString(), timeZone: ownerTimezone() },
-          end: { dateTime: end.toISOString(), timeZone: ownerTimezone() },
-        }),
+        summary: title,
+        description,
+        location,
+        start: { dateTime: start.toISOString(), timeZone: ownerTimezone() },
+        end: { dateTime: end.toISOString(), timeZone: ownerTimezone() },
+        ...(guests.length ? { attendees: guests.map((email) => ({ email })) } : {}),
       },
+      guests.length > 0,
     );
 
     return {
@@ -45,6 +58,7 @@ export default defineTool({
       id: created.id,
       localTime: formatLocal(start.toISOString()),
       link: created.htmlLink,
+      invited: guests,
     };
   },
 });
