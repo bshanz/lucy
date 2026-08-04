@@ -38,16 +38,32 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const RACE_TIMEOUT_MS = 3_000;
 
 /**
- * Chrome UA. Not stealth — api.resy.com is plain nginx with no bot manager
- * (verified: no Akamai/Cloudflare headers, unauthenticated search returns 200).
- * It's here because a default `node-undici` UA is a gratuitous tell on an
- * endpoint that only ever serves a browser.
+ * Chrome UA.
+ *
+ * api.resy.com sits behind Imperva (`x-cdn: Imperva`, `x-iinfo` on responses) —
+ * an earlier note here claimed "plain nginx, no bot manager", which was wrong:
+ * that check grepped for Akamai and Cloudflare headers and Imperva uses neither.
+ * In practice it has never challenged us — plain fetch gets 200s on search,
+ * auth, availability and booking alike — so no browser or stealth layer is
+ * warranted. But it is a WAF, so keep the request shape boring: browser-like UA,
+ * real Origin/Referer, no bursts. The bounded retry cap in the drop race is part
+ * of that, not just courtesy.
  */
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
-/** Refresh this far before the 45-day expiry. Wide enough to survive a cron outage. */
+/**
+ * Renew this far ahead of expiry. Wide enough to survive a cron outage.
+ *
+ * ⚠️ OTP login does NOT return a refresh token — the response carries `token`
+ * and `legacy_token` and nothing else. (The 45-day/90-day pair documented by the
+ * community Go clients comes from the PASSWORD flow, which this account can't
+ * use: `has_set_password` is 0.) So for a code-linked session there is nothing
+ * to refresh, and the margin below only governs how early we start warning.
+ * refreshTokens() is still correct for password-linked accounts; it simply never
+ * runs on this one.
+ */
 export const AUTH_REFRESH_MARGIN_MS = 5 * 24 * 3600 * 1000;
 /** Slots are ranked, but we never try more than this many before conceding. */
 export const MAX_BOOK_ATTEMPTS = 4;
@@ -268,17 +284,30 @@ export async function requestLoginCode(mobileNumber: string): Promise<void> {
 }
 
 /**
- * Step two: trade the texted code for a 45-day token and a 90-day refresh token.
+ * Trade the texted code for a session. THIS IS A THREE-STEP FLOW, not two.
  *
- * After this succeeds the OTP dance is over for about six weeks, and the refresh
- * cron carries it from there — which is what makes a human-in-the-loop login
- * acceptable for an otherwise unattended feature.
+ * Verified against the live API, because the obvious reading is wrong twice:
+ *
+ *  1. The code is verified by POSTing back to /4/auth/mobile — the SAME endpoint
+ *     that sent it. Sending `code` is what distinguishes verify from request.
+ *     Posting the code to /4/auth/challenge instead returns
+ *     `{"challenge_id": "An invalid challenge_id was provided"}`, which reads
+ *     like a bad code and is really a bad endpoint.
+ *
+ *  2. Resy then answers with a `challenge` — "Hey Brian, is that you?" — and
+ *     asks for a SECOND FACTOR, the email address on the account. Only after
+ *     /4/auth/challenge succeeds does a token come back. A two-step
+ *     implementation gets a 200 at step 2 and no token, and looks like a
+ *     rejected code.
+ *
+ * The email comes from OWNER_EMAIL, never from the model, for the same reason
+ * the phone number does: together they are the whole credential.
  */
 export async function verifyLoginCode(
   mobileNumber: string,
   code: string,
 ): Promise<ResyTokens> {
-  const body = await resyFetch<Record<string, unknown>>(AUTH_CHALLENGE, {
+  const first = await resyFetch<Record<string, any>>(AUTH_MOBILE, {
     method: "POST",
     form: {
       code,
@@ -288,7 +317,53 @@ export async function verifyLoginCode(
     },
     authenticated: false,
   });
-  const tokens = tokensFrom(body);
+
+  // Some accounts may hand back a token immediately with no second factor.
+  if (first?.token || first?.user?.token) {
+    const tokens = tokensFrom(first.user ?? first);
+    await persist(tokens);
+    return tokens;
+  }
+
+  const challenge = first?.challenge;
+  if (!challenge?.challenge_id) {
+    throw new ResyError(
+      "Resy accepted the code but didn't return a session. The code may have already been used.",
+      "auth",
+    );
+  }
+
+  // The challenge declares what it wants. Today that is always the account
+  // email; anything else needs a human, so say so rather than guessing.
+  const wants: string[] = (challenge.properties ?? []).map((p: any) => p?.name);
+  if (wants.length > 0 && !wants.includes("em_address")) {
+    throw new ResyError(
+      `Resy is asking for something I can't supply (${wants.join(", ")}). ` +
+        `The owner will need to sign in on resy.com this time.`,
+      "needs_login",
+    );
+  }
+
+  const email = process.env.OWNER_EMAIL;
+  if (!email) {
+    throw new ResyError(
+      "Resy wants the account's email address to finish signing in, but OWNER_EMAIL isn't set.",
+      "not_configured",
+    );
+  }
+
+  const user = await resyFetch<Record<string, unknown>>(AUTH_CHALLENGE, {
+    method: "POST",
+    form: {
+      challenge_id: String(challenge.challenge_id),
+      em_address: email,
+      device_type_id: deviceTypeId(),
+      device_token: deviceToken(),
+    },
+    authenticated: false,
+  });
+
+  const tokens = tokensFrom(user);
   await persist(tokens);
   return tokens;
 }
@@ -336,6 +411,21 @@ export async function refreshTokens(refreshToken: string): Promise<ResyTokens> {
 async function persist(tokens: ResyTokens): Promise<void> {
   cachedAuth = tokens;
   if (store) await store.save(tokens);
+}
+
+/**
+ * When the session actually dies, in ms epoch, or null if it can't be known.
+ *
+ * The governing clock is NOT always the same field. A password-linked account
+ * has a refresh token, so the session survives until THAT expires. A code-linked
+ * account has none — the auth token's own expiry is the end of the line.
+ *
+ * Getting this wrong is silent and total: reading refresh_expires_at on an
+ * OTP-only account yields null, every "is it expiring?" check short-circuits to
+ * "no", and the owner discovers his session died when a snipe doesn't fire.
+ */
+export function sessionExpiresAt(t: ResyTokens): number | null {
+  return t.refreshToken ? t.refreshExpiresAt : t.authExpiresAt;
 }
 
 export function tokensNeedRefresh(t: ResyTokens, marginMs = AUTH_REFRESH_MARGIN_MS): boolean {

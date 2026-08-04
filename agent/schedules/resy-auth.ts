@@ -1,6 +1,6 @@
 import { defineSchedule } from "eve/schedules";
 import sendblue from "#channels/sendblue.js";
-import { getAuthToken, redact } from "#lib/resy.js";
+import { getAuthToken, redact, sessionExpiresAt } from "#lib/resy.js";
 import { ensureResyStore, loadResyTokens } from "#lib/resy-store.js";
 import { ownerLocalHour } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
@@ -8,12 +8,16 @@ import { supabase } from "#lib/supabase.js";
 /**
  * Keeps the Resy session alive, and shouts BEFORE it dies rather than after.
  *
- * Refreshing returns a NEW refresh token every time, so a session that gets
- * touched daily rolls its 90-day window forward indefinitely and effectively
- * never expires. That makes this cron the thing that keeps Resy connected, not
- * merely an optimisation — and it means the interesting failure is not "the
- * token aged out" but "refresh started being refused" (password changed,
- * session revoked, account action).
+ * ⚠️ WHAT THIS CAN AND CANNOT DO depends on how the account was linked, and the
+ * difference is total. A PASSWORD-linked account gets a refresh token, and each
+ * refresh returns a new one, so touching it daily rolls the window forward
+ * indefinitely and the session never expires. A CODE-linked account — which is
+ * what OTP login produces, and what this deployment has — gets `token` and
+ * `legacy_token` and NO refresh token. Nothing here can extend it. The 45-day
+ * clock simply runs down and the owner must text a fresh code.
+ *
+ * So on this account the cron is not a renewer, it is a smoke alarm. Its whole
+ * job is to notice the expiry coming and say so while there is still time.
  *
  * ⚠️ THIS ACCOUNT HAS NO PASSWORD. Resy logs in by texted code, so there is no
  * unattended way back once a session is gone: the owner has to run connect_resy
@@ -69,11 +73,12 @@ export default defineSchedule({
     if (!existing) return;
 
     try {
-      // force=true renews on schedule rather than waiting for the token to drift
-      // into its expiry margin — and each renewal rolls the refresh window
-      // forward, which is what makes the session effectively permanent.
+      // Doubles as the liveness probe. On a password-linked account force=true
+      // genuinely renews; on a code-linked one there is nothing to renew, so
+      // this just confirms the stored token still works — and throws, landing in
+      // the catch below, once it doesn't.
       await getAuthToken(true);
-      console.log("[resy-auth] session refreshed");
+      console.log("[resy-auth] session ok");
     } catch (err) {
       console.error("[resy-auth] refresh failed:", redact(String(err)));
 
@@ -97,14 +102,22 @@ export default defineSchedule({
       return;
     }
 
-    // Refresh worked. Belt-and-braces: if the refresh window is somehow running
-    // down anyway — Lucy was deployed-down for weeks, or Resy stopped rolling it
-    // forward — give real notice while a code exchange can still be scheduled
-    // calmly, instead of discovering it on the morning of a drop.
+    // The session is alive. Now: how long has it actually got?
+    //
+    // ⚠️ On a code-linked account this is the ONLY thing standing between the
+    // owner and a silent expiry, because there is no refresh token to roll the
+    // window forward — the 45-day auth token simply runs out and every armed
+    // snipe dies with it. sessionExpiresAt picks the field that actually
+    // governs; reading refresh_expires_at directly returns null here and would
+    // make this whole branch a no-op, which is precisely the failure it exists
+    // to prevent.
     const fresh = await loadResyTokens();
-    if (!fresh?.refreshExpiresAt) return;
+    if (!fresh) return;
 
-    const daysLeft = Math.floor((fresh.refreshExpiresAt - Date.now()) / 86400_000);
+    const expiresAt = sessionExpiresAt(fresh);
+    if (!expiresAt) return;
+
+    const daysLeft = Math.floor((expiresAt - Date.now()) / 86400_000);
     if (!WARN_AT_DAYS.includes(daysLeft)) return;
 
     const armed = await armedSnipeCount();

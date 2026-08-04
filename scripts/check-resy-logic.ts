@@ -21,6 +21,7 @@ import {
   dropAtForBookingWindow,
   formatTime,
   rankSlots,
+  sessionExpiresAt,
   toMinutes,
   type ResySlot,
 } from "#lib/resy.js";
@@ -154,6 +155,50 @@ check("any deposit refused when cap is zero", depositWithinBounds(1, 0), false);
 check("deposit exactly at the cap is authorised", depositWithinBounds(5000, 5000), true);
 check("one cent over the cap is refused", depositWithinBounds(5001, 5000), false);
 check("well under the cap", depositWithinBounds(2500, 5000), true);
+
+// ---------------------------------------------------------------------------
+// sessionExpiresAt — which clock actually governs
+// ---------------------------------------------------------------------------
+//
+// This one is worth a test precisely because getting it wrong is INVISIBLE.
+// An OTP-linked account has no refresh token, so reading refresh_expires_at
+// yields null, every expiry check short-circuits to "nothing to warn about",
+// and the first symptom is a snipe that didn't fire six weeks later.
+
+const DAY = 86400_000;
+const authOnly = {
+  authToken: "a",
+  refreshToken: null,
+  authExpiresAt: 1000 * DAY,
+  refreshExpiresAt: null,
+};
+const withRefresh = {
+  authToken: "a",
+  refreshToken: "r",
+  authExpiresAt: 1000 * DAY,
+  refreshExpiresAt: 2000 * DAY,
+};
+
+check(
+  "code-linked session is governed by the AUTH token expiry",
+  sessionExpiresAt(authOnly),
+  1000 * DAY,
+);
+check(
+  "password-linked session is governed by the REFRESH expiry",
+  sessionExpiresAt(withRefresh),
+  2000 * DAY,
+);
+check(
+  "a refresh token with no stated expiry doesn't silently fall back to the auth clock",
+  sessionExpiresAt({ ...withRefresh, refreshExpiresAt: null }),
+  null,
+);
+check(
+  "an opaque token with no expiry at all reports unknown, not zero",
+  sessionExpiresAt({ ...authOnly, authExpiresAt: null }),
+  null,
+);
 
 // ---------------------------------------------------------------------------
 // Time helpers
