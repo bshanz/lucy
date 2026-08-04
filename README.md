@@ -1,6 +1,6 @@
 # Lucy - a personal AI assistant you text like a person
 
-Lucy is a personal assistant that lives in **iMessage and Slack**, deployed entirely on accounts you own. She reads and triages your **Gmail**, manages your **Google Calendar and Tasks**, schedules **reminders that follow up until you actually do the thing**, keeps **long-term memory**, and quietly maintains a **diary of your life**. No third-party assistant product in the loop: your deployment, your database, your API keys, and your data live in your own Vercel, Supabase, and Google accounts. (Prefer real self-hosting? eve's build output runs on any Node host via `eve start`.)
+Lucy is a personal assistant that lives in **iMessage and Slack**, deployed entirely on accounts you own. She reads and triages your **Gmail**, manages your **Google Calendar and Tasks**, schedules **reminders that follow up until you actually do the thing**, books **restaurant reservations** (including sniping tables the second they drop), keeps **long-term memory**, and quietly maintains a **diary of your life**. No third-party assistant product in the loop: your deployment, your database, your API keys, and your data live in your own Vercel, Supabase, and Google accounts. (Prefer real self-hosting? eve's build output runs on any Node host via `eve start`.)
 
 ```
 you  →  iMessage: "remind me tomorrow at 9 to follow up with Alex,
@@ -26,8 +26,7 @@ Built on [eve](https://vercel.com/docs) (Vercel's durable-agent framework), [Sen
 - **Google Calendar + Tasks** - list/create events, manage the default task list. One OAuth grant covers all three Google services.
 - **Memory + diary** - durable facts (`remember`) and timestamped moments (`log_moment`) in separate stores, both recallable conversationally ("what did I do last weekend?").
 - **Flight price tracking** - price any route on demand, or watch up to 6 and get texted unprompted when a fare is genuinely notable. Google Flights (via SerpAPI) returns its own `typical_price_range` in the same call, so "is $613 good for this route?" is answerable on the *first* check with no accumulated history. Alerts are edge-triggered, not level-triggered: a fare parked below the typical range texts you once, not every day for six weeks.
-- **Restaurant reservations (Resy)** - search, check availability, book, and cancel on your own Resy account. The real feature is **sniping**: hard tables drop at an exact second weeks in advance and are gone in under ten, which is far less time than an approval round-trip over iMessage. So you approve the *watch*, not the booking - venue, date, party size, time window, deposit cap - and at the drop moment Lucy books unattended inside those bounds and texts you the result, win or lose. The time window is a hard bound, not a preference: a table outside it is one you never authorised. Venue constraints are checked at arm time rather than discovered at T-0, because some venues gate booking behind a reCAPTCHA (this varies *between locations of the same restaurant* - Carbone NYC can be sniped, Carbone Miami can't) and arming a snipe that was never going to work is worse than refusing it. You link the account **by conversation, not by config**: Resy signs in with a texted code, so you say "connect resy", she has Resy text your phone, you text the six digits back, and that's the last you hear of it - the stored session renews itself on a cron.
-
+- **Restaurant reservations (Resy)** - search, check availability, book, and cancel on your own Resy account. The real feature is **sniping**: hard tables drop at an exact second weeks in advance and are gone in under ten, which is far less time than an approval round-trip over iMessage. So you approve the *watch*, not the booking - venue, date, party size, time window, deposit cap - and at the drop moment Lucy books unattended inside those bounds and texts you the result, win or lose. The time window is a hard bound, not a preference: a table outside it is one you never authorised. Venue constraints are checked at arm time rather than discovered at T-0, because some venues gate booking behind a reCAPTCHA (this varies *between locations of the same restaurant* - Carbone NYC can be sniped, Carbone Miami can't) and arming a snipe that was never going to work is worse than refusing it. You link the account **by conversation, not by config**: Resy signs in with a texted code, so you say "connect resy", she has Resy text your phone, and you text the six digits back. That session lasts ~45 days and, on a code-linked account, genuinely cannot renew itself - Resy issues no refresh token - so Lucy watches the clock and nudges you at 7, 3 and 1 days out rather than letting a snipe discover it at 9am on drop day.
 - **Single-owner security model** - the only trusted iMessage sender is `OWNER_PHONE`; the only trusted Slack user is `OWNER_SLACK_USER_ID`. Everyone else is dropped in code before the model ever sees the message.
 
 ## Architecture
@@ -52,7 +51,8 @@ Slack    ⇄ Vercel Connect–brokered webhooks          │
    resy-snipe cron: every minute; claims snipes dropping in the next ~90s,
    pre-warms key+token off the clock, then holds the invocation and sleeps to
    the exact millisecond before racing /4/find → /3/details → /3/book
-   resy-auth cron: hourly, acts at 4am owner-local; renews the 45-day token
+   resy-auth cron: hourly, acts at 4am owner-local; probes the session and
+   warns at 7/3/1 days - a code-linked session has no refresh token to roll
 ```
 
 Design decisions worth knowing about (they're where the bugs live):
@@ -67,6 +67,8 @@ Design decisions worth knowing about (they're where the bugs live):
 - **The Resy API key is scraped at runtime, never pinned.** Every Resy bot on GitHub hardcodes `VbWk7s3L4KiK5fzlO7JD3Q5EYolJI4G1`. That key is dead; the live one ends `…lJI7n5` and will rotate again. `agent/lib/resy.ts` pulls it out of resy.com's JS bundle and caches it for six hours, which is the difference between an integration that rots and one that doesn't.
 
 - **The pre-warm is what wins the table, not the polling loop.** Scraping the key is two round trips and refreshing the token is a third; paying for those at T-0 loses the race. `resy-snipe` claims the row ~90s early, warms everything ~10s early, then holds the invocation and sleeps to the exact millisecond before it starts asking. Vercel cron only fires once a minute - the in-invocation hold is what turns that into second-level precision, the same trick `sendblue-poll` uses for latency.
+
+- **The spending cap is enforced on a field that actually exists, in units that were checked.** Two bugs here were live at once and neither raised an error. The card was attached only when a deposit looked due - but plenty of venues want a card *on file* to hold a **free** table and charge only for a no-show, and Resy answers a missing one with a bare `402` that is indistinguishable from a real deposit demand, so booking failed *and* the error text confidently told the owner he had no card while two sat on his account. Meanwhile the charge was read from `config.deposit_fee`, a field on no Resy response, so every venue priced as $0 and the cap was never enforced at all: a **$400** prix fixe would have walked straight through a $50 limit. The real amount is `payment.amounts.total`, in **dollars** while everything here counts integer cents - one conversion boundary, now its own function with tests against verbatim live payloads. The general lesson, and the reason this bullet exists: a plausible-looking field name that doesn't exist fails *silently and permissively*, and money code is where that is least survivable.
 
 - **Personal data lives in env, not code.** The committed persona (`agent/instructions.ts`) is fully generic; `agent/instructions/owner.ts` injects the owner's name/email/timezone at runtime from `OWNER_*` vars. (Build-time templating doesn't work here: eve evaluates instruction modules in an env-less sandbox at build.)
 
@@ -117,7 +119,11 @@ requirements - each one is a silent-failure mode someone already hit:
    I do all Google sign-ins myself.
 7. Slack (ask me if I want it): follow the README's connector steps,
    including the detach/attach trigger re-point to /eve/v1/slack.
-8. Verify end-to-end: npx tsc clean, `eve info` shows the channels/tools/
+8. Resy (ask me if I want it): nothing to configure - after deploying, tell
+   me to text "connect resy" and relay the six-digit code back to the
+   assistant. Do NOT ask me for a Resy password; most accounts don't have
+   one. Run scripts/check-resy-live.ts to confirm; it stops before booking.
+9. Verify end-to-end: npx tsc clean, `eve info` shows the channels/tools/
    schedules, then have me text the Sendblue number and confirm a reply,
    a reminder round-trip, and (if Google is connected) an inbox summary.
 
@@ -201,7 +207,23 @@ vercel connect attach slack/<agent-name> --triggers --trigger-path /eve/v1/slack
 
 ⚠️ The create flow registers Connect's default trigger path, which eve doesn't serve - the detach/attach re-point is required, not optional. Set `OWNER_SLACK_USER_ID` (Slack profile → ⋮ → Copy member ID).
 
-### 7. Deploy
+### 7. Resy (optional)
+
+Nothing to configure. Resy signs in with a texted code, so you link it by talking to Lucy after deploying: say **"connect resy"**, she asks Resy to text `OWNER_PHONE`, you send her the six digits, done. `scripts/connect-resy.ts` does the same from a terminal if you'd rather (`--send` is an explicit flag, because it makes a real phone buzz).
+
+⚠️ The session lasts ~45 days and **cannot renew itself** if your account has no password (`has_set_password: 0`, which is most accounts) - Resy returns no refresh token for a code login. Lucy warns at 7/3/1 days; re-linking is one more code. If you *do* have a password, setting `RESY_EMAIL`/`RESY_PASSWORD` gives her a self-healing fallback.
+
+⚠️ Some venues can't be auto-booked at all, and it varies **between locations of the same restaurant** - Carbone NYC can be sniped, Carbone Miami can't (`feature_recaptcha`). `search_resy` reports it and `snipe_resy` refuses to arm one, deliberately: an armed snipe that was never going to win is worse than a refusal, because you stop looking for a table.
+
+Verify without booking anything:
+
+```bash
+npx tsx scripts/check-resy-logic.ts                          # pure logic, no network
+npx tsx --env-file=.env.local scripts/check-resy-claim.ts    # no double-booking
+npx tsx --env-file=.env.local scripts/check-resy-live.ts     # live, stops before /3/book
+```
+
+### 8. Deploy
 
 ```bash
 npx tsc && npx eve info       # 0 errors expected; lists channels/tools/schedules
@@ -230,6 +252,7 @@ The webhook and the poller share the same dedupe table, so they safely coexist -
 | Vercel | Pro required for 1-minute crons |
 | Vercel Connect | $3 per 10,000 token requests (pennies at personal scale) |
 | SerpAPI (flights) | free tier = 250 searches/mo; 6 watches ≈ 186, leaving ~64 for questions. $25/mo for 1,000 |
+| Resy | $0 - your own account, no API fees. Deposits/prepaid menus are charged by the restaurant, and capped per snipe |
 | Model usage | via AI Gateway; a few $/mo for personal traffic |
 
 ## Security model
@@ -238,6 +261,8 @@ The webhook and the poller share the same dedupe table, so they safely coexist -
 - Email content is treated as untrusted input; the persona refuses instructions embedded in mail. Outbound email is approval-gated per send.
 - eve's HTTP surface fails closed in production; the webhook/authorize routes require a bearer secret (timing-safe comparison).
 - Google credentials never touch app env - Vercel Connect stores and refreshes the grant server-side; the app only ever sees short-lived access tokens.
+- Resy login credentials are **never tool arguments**. The phone and email come from `OWNER_PHONE`/`OWNER_EMAIL`; together they are the entire credential, so nothing that talks its way into a prompt can redirect a login code to a device someone else holds. The stored session token never reaches the model - it can book, cancel, and read payment methods, so every error message is built through a redactor.
+- Automatic booking is **bounded by an approval card**, not by the model's judgement. Venue, date, party size, time window and deposit cap are enforced in code at drop time: a table outside the window is refused rather than treated as close enough.
 - Supabase tables have RLS enabled with no policies: service-role key only.
 
 ## Project structure
@@ -255,10 +280,19 @@ agent/
     sendblue-poll.ts     # fast-poll ingress: 5 passes × 10s per minute-cron
     reminder-poll.ts     # delivers due reminders + escalating follow-ups
     flight-poll.ts       # daily flight price checks, quota-aware, edge-triggered
-  tools/                 # reminders, memory, diary, gmail, calendar, tasks, flights
-  lib/                   # sendblue/gmail/serpapi clients, tz math, supabase, formatting
+    resy-snipe.ts        # minute cron; claims imminent drops, then sleeps to the
+                         #   exact millisecond and races find -> details -> book
+    resy-auth.ts         # daily; session liveness + 7/3/1-day expiry warnings
+  tools/                 # reminders, memory, diary, gmail, calendar, tasks,
+                         #   flights, resy (search/availability/book/snipe/cancel)
+  lib/                   # sendblue/gmail/serpapi/resy clients, tz math, supabase,
+                         #   formatting; resy.ts also holds the pure ranking logic
 scripts/
   authorize-gmail.mjs    # mints the dev-environment Google grant
+  connect-resy.ts        # links Resy from the CLI (--send is opt-in; it texts you)
+  check-resy-logic.ts    # pure checks: slot ranking, deposit cap, DST, unit boundary
+  check-resy-claim.ts    # proves two concurrent crons can't double-book a table
+  check-resy-live.ts     # live ladder; stops before /3/book on purpose
 supabase/migrations/     # schema
 ```
 
