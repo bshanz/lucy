@@ -1,6 +1,6 @@
 import { defineTool } from "eve/tools";
-import { always } from "eve/tools/approval";
 import { z } from "zod";
+import { spendApproval } from "#lib/approval.js";
 import {
   ResyError,
   book,
@@ -30,7 +30,7 @@ export default defineTool({
       .optional()
       .describe("Deposit ceiling in CENTS. Default 0 = refuse anything requiring a card."),
   }),
-  approval: always(),
+  approval: spendApproval,
   async execute({ configToken, date, partySize, maxDepositCents }) {
     ensureResyStore();
     const cap = maxDepositCents ?? 0;

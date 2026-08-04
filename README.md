@@ -262,7 +262,8 @@ The webhook and the poller share the same dedupe table, so they safely coexist -
 - eve's HTTP surface fails closed in production; the webhook/authorize routes require a bearer secret (timing-safe comparison).
 - Google credentials never touch app env - Vercel Connect stores and refreshes the grant server-side; the app only ever sees short-lived access tokens.
 - Resy login credentials are **never tool arguments**. The phone and email come from `OWNER_PHONE`/`OWNER_EMAIL`; together they are the entire credential, so nothing that talks its way into a prompt can redirect a login code to a device someone else holds. The stored session token never reaches the model - it can book, cancel, and read payment methods, so every error message is built through a redactor.
-- Automatic booking is **bounded by an approval card**, not by the model's judgement. Venue, date, party size, time window and deposit cap are enforced in code at drop time: a table outside the window is refused rather than treated as close enough.
+- Booking approval is **opt-out per deployment** (`RESY_AUTO_APPROVE=1`), and gated by default so a clone never books silently. Turning it off does not make booking unbounded — the seating window, deposit cap, venue guard, snipe cap and anti-double-booking claim are all enforced in code and survive it. Cancelling a reservation stays gated regardless: it's destructive and, unlike a drop, never time-critical.
+- Automatic booking is **bounded in code**, not by the model's judgement. Venue, date, party size, time window and deposit cap are enforced in code at drop time: a table outside the window is refused rather than treated as close enough.
 - Supabase tables have RLS enabled with no policies: service-role key only.
 
 ## Project structure

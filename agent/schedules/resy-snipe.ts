@@ -25,6 +25,7 @@ import {
   type ResySnipeRow,
 } from "#lib/resy.js";
 import { ensureResyStore } from "#lib/resy-store.js";
+import { formatLocal } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 /**
@@ -297,10 +298,16 @@ async function runWatch(
     }
 
     if (slots.length > 0) {
-      // Inventory exists. Hand straight to the same race the precise path uses —
-      // it re-fetches, ranks, and walks candidates identically.
+      // Inventory exists. Stamp the moment BEFORE racing: this is the
+      // measurement that lets every future snipe at this venue use a precise
+      // drop_at instead of a wide window, and it must survive the race failing.
+      const detectedAt = new Date().toISOString();
+      await supabase.from("resy_snipes").update({ detected_at: detectedAt }).eq("id", snipe.id);
+
+      // Hand to the same race the precise path uses — it re-fetches, ranks, and
+      // walks candidates identically.
       const outcome = await race(snipe);
-      await finish(snipe, outcome, receive, appAuth);
+      await finish({ ...snipe, detected_at: detectedAt }, outcome, receive, appAuth);
       return;
     }
     await sleep(WATCH_POLL_INTERVAL_MS);
@@ -363,6 +370,15 @@ async function finish(
   // A silent miss is the worst outcome in the whole feature: he planned an
   // evening around a table he thinks is handled. Losing is fine; not being told
   // is not. So every branch here speaks, win or lose.
+  // A watch that saw inventory learned the venue's release time. Say it out
+  // loud either way: it is the thing that makes the next attempt precise, and a
+  // lost race that measured the drop is not a wasted morning.
+  const measured = snipe.detected_at
+    ? ` You were watching a window rather than a known drop time, and inventory ` +
+      `actually appeared at ${formatLocal(snipe.detected_at)} — tell him that, ` +
+      `briefly, as something useful you now know about this restaurant.`
+    : "";
+
   const prompt =
     outcome.kind === "booked"
       ? `A reservation you were sniping for the owner just came through: ` +
@@ -371,13 +387,14 @@ async function finish(
         (outcome.reservationId ? `, confirmation ${outcome.reservationId}` : "") +
         (outcome.depositCents > 0 ? `, ${formatUsd(outcome.depositCents)} deposit taken` : "") +
         `. Text him the good news in one or two short lines — the restaurant, the day, the time, ` +
-        `the party size. Use ONLY these details and don't invent an address or a dress code.`
+        `the party size. Use ONLY these details and don't invent an address or a dress code.` +
+        measured
       : `A reservation snipe just LOST: ${snipe.venue_name} on ${snipe.reservation_date} for ` +
         `${snipe.party_size}, wanted between ${formatTime(hhmm(snipe.earliest_time))} and ` +
         `${formatTime(hhmm(snipe.latest_time))}. What happened: ${outcome.reason}. Tell him ` +
         `straight away, in one or two lines, without drama and without apologising twice. ` +
         `Offer to try again at the next drop or to look at nearby nights. Do NOT claim anything ` +
-        `was booked.`;
+        `was booked.` + measured;
 
   try {
     await dispatch(receive, appAuth, snipe, prompt);

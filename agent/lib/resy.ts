@@ -903,6 +903,8 @@ export type ResySnipeRow = {
   watch_until: string | null;
   status: "armed" | "firing" | "booked" | "missed" | "failed" | "cancelled";
   fired_at: string | null;
+  /** When a watch first saw inventory — the measurement, written once. */
+  detected_at: string | null;
   resy_token: string | null;
   reservation_id: string | null;
   booked_time: string | null;

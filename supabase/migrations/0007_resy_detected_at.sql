@@ -1,0 +1,12 @@
+-- When a watch-mode snipe first SAW inventory appear.
+--
+-- This is the measurement that makes the next snipe better. Resy publishes no
+-- booking-window metadata, so a venue's release time can only be learned by
+-- watching one happen — and a watch-mode snipe is already sitting there when it
+-- does. Recording the moment turns every watch into a free measurement: the
+-- first one costs a wide window, and every snipe after it can use a precise
+-- drop_at instead.
+--
+-- Distinct from fired_at, which is a per-minute lease and gets overwritten on
+-- every tick. This is written once, when inventory actually shows up.
+alter table resy_snipes add column detected_at timestamptz;

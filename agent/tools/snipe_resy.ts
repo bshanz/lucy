@@ -1,6 +1,6 @@
 import { defineTool } from "eve/tools";
-import { always } from "eve/tools/approval";
 import { z } from "zod";
+import { spendApproval } from "#lib/approval.js";
 import {
   MAX_ACTIVE_SNIPES,
   ResyError,
@@ -82,7 +82,7 @@ export default defineTool({
       .optional()
       .describe("End of the watch window, owner-local 'YYYY-MM-DDTHH:MM'. Requires watchFromLocal."),
   }),
-  approval: always(),
+  approval: spendApproval,
   async execute(input, ctx) {
     ensureResyStore();
 
