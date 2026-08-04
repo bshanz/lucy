@@ -26,6 +26,8 @@ Built on [eve](https://vercel.com/docs) (Vercel's durable-agent framework), [Sen
 - **Google Calendar + Tasks** - list/create events, manage the default task list. One OAuth grant covers all three Google services.
 - **Memory + diary** - durable facts (`remember`) and timestamped moments (`log_moment`) in separate stores, both recallable conversationally ("what did I do last weekend?").
 - **Flight price tracking** - price any route on demand, or watch up to 6 and get texted unprompted when a fare is genuinely notable. Google Flights (via SerpAPI) returns its own `typical_price_range` in the same call, so "is $613 good for this route?" is answerable on the *first* check with no accumulated history. Alerts are edge-triggered, not level-triggered: a fare parked below the typical range texts you once, not every day for six weeks.
+- **Restaurant reservations (Resy)** - search, check availability, book, and cancel on your own Resy account. The real feature is **sniping**: hard tables drop at an exact second weeks in advance and are gone in under ten, which is far less time than an approval round-trip over iMessage. So you approve the *watch*, not the booking - venue, date, party size, time window, deposit cap - and at the drop moment Lucy books unattended inside those bounds and texts you the result, win or lose. The time window is a hard bound, not a preference: a table outside it is one you never authorised. Venue constraints are checked at arm time rather than discovered at T-0, because some venues gate booking behind a reCAPTCHA (this varies *between locations of the same restaurant* - Carbone NYC can be sniped, Carbone Miami can't) and arming a snipe that was never going to work is worse than refusing it. You link the account **by conversation, not by config**: Resy signs in with a texted code, so you say "connect resy", she has Resy text your phone, you text the six digits back, and that's the last you hear of it - the stored session renews itself on a cron.
+
 - **Single-owner security model** - the only trusted iMessage sender is `OWNER_PHONE`; the only trusted Slack user is `OWNER_SLACK_USER_ID`. Everyone else is dropped in code before the model ever sees the message.
 
 ## Architecture
@@ -46,6 +48,11 @@ Slack    ⇄ Vercel Connect–brokered webhooks          │
                                                                                │
    flight-poll cron: hourly, acts at 9am owner-local; expires stale watches, ──┘
    claims each row before spending a metered SerpAPI search, alerts on edges
+
+   resy-snipe cron: every minute; claims snipes dropping in the next ~90s,
+   pre-warms key+token off the clock, then holds the invocation and sleeps to
+   the exact millisecond before racing /4/find → /3/details → /3/book
+   resy-auth cron: hourly, acts at 4am owner-local; renews the 45-day token
 ```
 
 Design decisions worth knowing about (they're where the bugs live):
@@ -53,6 +60,14 @@ Design decisions worth knowing about (they're where the bugs live):
 - **Claim-before-dispatch, everywhere.** Interrupted cron steps re-run in eve's durability model. Every ingress path atomically claims a message id (or flips a reminder's status) *before* dispatching to the agent, and reverts the claim on failure. A crash loses one reply at worst - it never double-texts you. This is also what lets the polling and webhook ingress run concurrently against the same inbox.
 - **The model never does timezone math.** Tools accept owner-timezone wall-clock strings (`2026-08-01T17:00`); a tested converter handles UTC and DST (including the fall-back day, and recurrences that hold 5pm across clock changes). LLMs are bad at offsets exactly twice a year, which is the worst kind of bad.
 - **The model doesn't know what time it is, either.** Every inbound dispatch injects the current owner-local time as session context, and time-validation errors echo the current time back so the model self-corrects in one retry ("tomorrow" from a model with no clock is a footgun).
+- **No browser in the Resy path, on purpose.** The obvious way to automate a reservation site is a persistent headless browser. It's the wrong tool here, and the evidence is checkable: `api.resy.com` answers `server: nginx` with no bot-manager fingerprint, unauthenticated venue search returns a clean 200, and a bad key comes back as a tidy JSON `419` rather than an HTML challenge. Meanwhile login returns a **45-day auth token plus a 90-day refresh token** - so a browser profile would be a fragile way to hold a session that a refresh token holds properly, and it can't be renewed from a cron or hit a millisecond deadline. (The Akamai/Cloudflare war stories in the community tooling are about OpenTable and Tock, not Resy.) `@agent-browser/eve` stays mounted as the escape hatch if that ever changes.
+
+- **Resy's auth endpoints were read out of its own JS bundle, not copied from other bots.** Worth doing, because the community tooling is wrong: auth lives on `/4` (`4/auth/password`, `4/auth/mobile`, `4/auth/challenge`) while refresh is still on `/3` (`3/auth/refresh`). Every Resy bot on GitHub posts to `3/auth/password`, which no longer exists. The OTP flow is two calls - `4/auth/mobile` texts a code, `4/auth/challenge` trades it for a 45-day token - which is what makes a human-in-the-loop login acceptable for an otherwise unattended feature: you do it once and the refresh cron carries it for months. **The phone number comes from `OWNER_PHONE`, never from a tool argument**, so nothing that talks its way into a prompt can have Resy text a login code to a phone you don't control.
+
+- **The Resy API key is scraped at runtime, never pinned.** Every Resy bot on GitHub hardcodes `VbWk7s3L4KiK5fzlO7JD3Q5EYolJI4G1`. That key is dead; the live one ends `…lJI7n5` and will rotate again. `agent/lib/resy.ts` pulls it out of resy.com's JS bundle and caches it for six hours, which is the difference between an integration that rots and one that doesn't.
+
+- **The pre-warm is what wins the table, not the polling loop.** Scraping the key is two round trips and refreshing the token is a third; paying for those at T-0 loses the race. `resy-snipe` claims the row ~90s early, warms everything ~10s early, then holds the invocation and sleeps to the exact millisecond before it starts asking. Vercel cron only fires once a minute - the in-invocation hold is what turns that into second-level precision, the same trick `sendblue-poll` uses for latency.
+
 - **Personal data lives in env, not code.** The committed persona (`agent/instructions.ts`) is fully generic; `agent/instructions/owner.ts` injects the owner's name/email/timezone at runtime from `OWNER_*` vars. (Build-time templating doesn't work here: eve evaluates instruction modules in an env-less sandbox at build.)
 
 ## Setup with an AI agent (recommended)
