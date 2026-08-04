@@ -26,9 +26,10 @@ export default defineTool({
     "and deposit cap on a card first, and THAT CARD IS THE AUTHORIZATION for a real booking " +
     "with a real cancellation fee. Get venueId and venueName from search_resy first. " +
     "State the drop time back to him in his local time and get a clear yes. " +
-    "Give either dropAtLocal, or daysAhead + dropTimeLocal for the usual 'opens N days out at " +
-    "9am' pattern. If you don't know a venue's drop rule, ASK — do not guess, an armed snipe " +
-    "pointed at the wrong minute just loses silently.",
+    "If you KNOW the exact release time, give dropAtLocal (or daysAhead + dropTimeLocal). " +
+    "IF YOU DON'T KNOW IT, don't guess and don't ask him to guess either — give a watch window " +
+    "(watchFromLocal + watchUntilLocal) covering the likely hours, and Lucy books the moment " +
+    "tables appear. A guessed minute doesn't error, it just loses.",
   inputSchema: z.object({
     venueId: z.number().int().positive().describe("From search_resy"),
     venueName: z.string().min(1).describe("Exactly as search_resy returned it"),
@@ -68,6 +69,18 @@ export default defineTool({
       .string()
       .optional()
       .describe("Alternative: local time of day books open, HH:MM ('9am' → '09:00')"),
+    watchFromLocal: z
+      .string()
+      .optional()
+      .describe(
+        "USE THIS WHEN THE DROP TIME ISN'T KNOWN. Start of a window to watch, owner-local " +
+          "'YYYY-MM-DDTHH:MM'. Lucy polls across it and books the moment tables appear, " +
+          "instead of firing at a guessed second. Requires watchUntilLocal.",
+      ),
+    watchUntilLocal: z
+      .string()
+      .optional()
+      .describe("End of the watch window, owner-local 'YYYY-MM-DDTHH:MM'. Requires watchFromLocal."),
   }),
   approval: always(),
   async execute(input, ctx) {
@@ -103,9 +116,46 @@ export default defineTool({
       };
     }
 
-    // 2. Resolve the drop instant. Two accepted forms, one resolved answer.
+    // 2. Resolve WHEN to act. Either an exact instant, or a window to watch.
+    //
+    // Watch mode exists because a venue's release time usually isn't knowable:
+    // Resy publishes no booking-window metadata, and a snipe armed for the wrong
+    // minute doesn't error — it polls an empty window and reports a clean miss.
+    // Watching costs a few seconds of detection latency and cannot be an hour out.
     let dropAt: Date | null = null;
-    if (input.dropAtLocal) {
+    let watchFrom: Date | null = null;
+    let watchUntil: Date | null = null;
+
+    if (input.watchFromLocal || input.watchUntilLocal) {
+      if (!input.watchFromLocal || !input.watchUntilLocal) {
+        return {
+          ok: false as const,
+          error: "A watch window needs BOTH watchFromLocal and watchUntilLocal.",
+        };
+      }
+      if (input.dropAtLocal || input.daysAhead != null || input.dropTimeLocal) {
+        return {
+          ok: false as const,
+          error:
+            "Give either an exact drop time OR a watch window, not both — they're different " +
+            "ways to decide when to act and I can't do both on one snipe.",
+        };
+      }
+      watchFrom = computeDropAt(input.watchFromLocal);
+      watchUntil = computeDropAt(input.watchUntilLocal);
+      if (!watchFrom || !watchUntil) {
+        return {
+          ok: false as const,
+          error: "Couldn't read the watch window. Use YYYY-MM-DDTHH:MM with no offset.",
+        };
+      }
+      if (watchFrom >= watchUntil) {
+        return { ok: false as const, error: "The watch window ends before it starts." };
+      }
+      if (watchUntil.getTime() <= Date.now()) {
+        return { ok: false as const, error: "That watch window has already passed." };
+      }
+    } else if (input.dropAtLocal) {
       dropAt = computeDropAt(input.dropAtLocal);
       if (!dropAt) {
         return {
@@ -123,13 +173,14 @@ export default defineTool({
       return {
         ok: false as const,
         error:
-          "I need to know when the tables actually drop: either dropAtLocal, or daysAhead plus " +
-          "dropTimeLocal. Ask the owner when that restaurant releases reservations — guessing " +
-          "arms a snipe that fires at the wrong minute and loses without telling anyone.",
+          "I need to know when to act: either an exact drop time (dropAtLocal, or daysAhead " +
+          "plus dropTimeLocal), or a window to watch (watchFromLocal + watchUntilLocal). " +
+          "If the owner doesn't know when the restaurant releases tables, DON'T guess — use a " +
+          "watch window covering the likely hours. A guessed minute loses silently.",
       };
     }
 
-    if (dropAt.getTime() <= Date.now()) {
+    if (dropAt && dropAt.getTime() <= Date.now()) {
       return {
         ok: false as const,
         error:
@@ -220,7 +271,9 @@ export default defineTool({
         preferred_time: input.preferredTime ?? null,
         slot_types: input.slotTypes?.length ? input.slotTypes : null,
         max_deposit_cents: maxDepositCents,
-        drop_at: dropAt.toISOString(),
+        drop_at: dropAt ? dropAt.toISOString() : null,
+        watch_from: watchFrom ? watchFrom.toISOString() : null,
+        watch_until: watchUntil ? watchUntil.toISOString() : null,
       })
       .select("id")
       .single();
@@ -251,7 +304,11 @@ export default defineTool({
       // Echo the RESOLVED instant back in owner-local terms. The owner is about
       // to approve this card; a drop time computed an hour off is only catchable
       // here, by him, before it's armed.
-      dropsAt: formatLocal(dropAt.toISOString()),
+      dropsAt: dropAt ? formatLocal(dropAt.toISOString()) : null,
+      watching:
+        watchFrom && watchUntil
+          ? `${formatLocal(watchFrom.toISOString())} until ${formatLocal(watchUntil.toISOString())}`
+          : null,
       armedSnipes: (count ?? 0) + 1,
       maxSnipes: MAX_ACTIVE_SNIPES,
     };

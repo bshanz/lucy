@@ -61,6 +61,12 @@ const LOOKAHEAD_MS = 90_000;
 const GRACE_MS = 120_000;
 /** A 'firing' row older than this was orphaned by a crash mid-race. */
 const STUCK_MS = 10 * 60_000;
+/** How long one invocation watches before releasing its lease to the next tick. */
+const WATCH_PASS_MS = 50_000;
+/** Detection granularity in watch mode. Fast enough to matter, slow enough to be polite. */
+const WATCH_POLL_INTERVAL_MS = 3_000;
+/** A watch lease older than this was orphaned; let another worker take the row. */
+const LEASE_STALE_MS = 90_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 
@@ -223,7 +229,7 @@ async function runSnipe(
   receive: Receive,
   appAuth: ScheduleHandlerArgs["appAuth"],
 ): Promise<void> {
-  const dropAt = Date.parse(snipe.drop_at);
+  const dropAt = Date.parse(snipe.drop_at!);
 
   // --- Pre-warm, deliberately BEFORE the wait so the cost lands off the clock.
   try {
@@ -240,6 +246,74 @@ async function runSnipe(
 
   const outcome = await race(snipe);
   await finish(snipe, outcome, receive, appAuth);
+}
+
+/**
+ * Watch mode: no known drop second, so poll until inventory shows up.
+ *
+ * Used when a venue's release time is unknown — which is the normal case, since
+ * Resy publishes no booking-window metadata and every figure online is hearsay.
+ * A guessed drop_at that is an hour wrong loses silently; this cannot be wrong
+ * about the time, only a few seconds late, and a few seconds is a rounding error
+ * against an hour.
+ *
+ * Runs for most of one cron minute, then RELEASES the lease so the next tick
+ * picks the row up again. The row is never consumed by an empty poll — only a
+ * booking, or the window ending, finishes it.
+ */
+async function runWatch(
+  snipe: ResySnipeRow,
+  receive: Receive,
+  appAuth: ScheduleHandlerArgs["appAuth"],
+): Promise<void> {
+  try {
+    await Promise.all([resyApiKey(), getAuthToken(true)]);
+  } catch (err) {
+    const reason = err instanceof ResyError ? err.message : redact(String(err));
+    await finish(snipe, { kind: "failed", reason, attempts: 0 }, receive, appAuth);
+    return;
+  }
+
+  const until = Math.min(
+    Date.now() + WATCH_PASS_MS,
+    Date.parse(snipe.watch_until!), // never poll past the owner's window
+  );
+
+  while (Date.now() < until) {
+    let slots: ResySlot[] = [];
+    try {
+      slots = await findSlots({
+        venueId: snipe.venue_id,
+        day: snipe.reservation_date,
+        partySize: snipe.party_size,
+        fast: true,
+      });
+    } catch (err) {
+      if (err instanceof ResyError && (err.kind === "auth" || err.kind === "not_configured")) {
+        await finish(snipe, { kind: "failed", reason: err.message, attempts: 0 }, receive, appAuth);
+        return;
+      }
+      // Transport noise mid-drop is expected; keep watching.
+    }
+
+    if (slots.length > 0) {
+      // Inventory exists. Hand straight to the same race the precise path uses —
+      // it re-fetches, ranks, and walks candidates identically.
+      const outcome = await race(snipe);
+      await finish(snipe, outcome, receive, appAuth);
+      return;
+    }
+    await sleep(WATCH_POLL_INTERVAL_MS);
+  }
+
+  // Window still open, nothing yet: release the lease for the next tick. This is
+  // the whole reason watch rows keep status 'armed' — a status flip here would
+  // consume the snipe on its first empty minute.
+  await supabase
+    .from("resy_snipes")
+    .update({ fired_at: null })
+    .eq("id", snipe.id)
+    .eq("status", "armed");
 }
 
 /**
@@ -336,27 +410,72 @@ export default defineSchedule({
       .select("id");
     if (stuck?.length) console.warn(`[resy-snipe] recovered ${stuck.length} orphaned row(s)`);
 
-    // --- 1. Claim. status is in both the SET and the WHERE, so a duplicate
-    // cron delivery gets zero rows and cannot double-book.
+    // --- 1. Expire watch windows that closed without ever seeing inventory.
+    const { data: lapsed } = await supabase
+      .from("resy_snipes")
+      .update({ status: "missed", last_error: "watch window closed with nothing released" })
+      .eq("status", "armed")
+      .not("watch_until", "is", null)
+      .lt("watch_until", new Date(now).toISOString())
+      .select("*")
+      .returns<ResySnipeRow[]>();
+
+    for (const s of lapsed ?? []) {
+      try {
+        await dispatch(
+          receive,
+          appAuth,
+          s,
+          `A reservation watch just ended without anything opening: ${s.venue_name} on ` +
+            `${s.reservation_date} for ${s.party_size}. Nothing was booked and nothing is ` +
+            `still watching. Tell him in one short line and offer to try the next release.`,
+        );
+      } catch (err) {
+        console.error("[resy-snipe] lapse notice failed", err);
+      }
+    }
+
+    // --- 2. Claim PRECISE snipes: one shot, status flips so a duplicate cron
+    // delivery gets zero rows and cannot double-book.
     const { data: claimed, error } = await supabase
       .from("resy_snipes")
       .update({ status: "firing", fired_at: new Date().toISOString() })
       .eq("status", "armed")
+      .not("drop_at", "is", null)
       .gte("drop_at", new Date(now - GRACE_MS).toISOString())
       .lte("drop_at", new Date(now + LOOKAHEAD_MS).toISOString())
       .select("*")
       .returns<ResySnipeRow[]>();
-
     if (error) throw new Error(`[resy-snipe] claim failed: ${error.message}`);
-    const due = claimed ?? [];
-    if (due.length === 0) return;
 
-    console.log(`[resy-snipe] claimed ${due.length} snipe(s)`);
+    // --- 3. LEASE watch-mode snipes whose window is open. status stays 'armed'
+    // (an empty minute must not consume the row); fired_at is the lease, and a
+    // stale one is reclaimable so a crashed worker doesn't park the snipe.
+    const { data: leased, error: leaseErr } = await supabase
+      .from("resy_snipes")
+      .update({ fired_at: new Date().toISOString() })
+      .eq("status", "armed")
+      .not("watch_from", "is", null)
+      .lte("watch_from", new Date(now).toISOString())
+      .gte("watch_until", new Date(now).toISOString())
+      .or(`fired_at.is.null,fired_at.lt.${new Date(now - LEASE_STALE_MS).toISOString()}`)
+      .select("*")
+      .returns<ResySnipeRow[]>();
+    if (leaseErr) console.error(`[resy-snipe] lease failed: ${leaseErr.message}`);
+
+    const due = claimed ?? [];
+    const watching = leased ?? [];
+    if (due.length === 0 && watching.length === 0) return;
+
+    console.log(`[resy-snipe] ${due.length} firing, ${watching.length} watching`);
 
     // Concurrent, not sequential: two venues dropping in the same minute are
     // independent races, and making one wait for the other loses the second.
     // Each settles on its own — one failure must not strand another's booking.
-    const work = Promise.allSettled(due.map((s) => runSnipe(s, receive, appAuth)));
+    const work = Promise.allSettled([
+      ...due.map((s) => runSnipe(s, receive, appAuth)),
+      ...watching.map((s) => runWatch(s, receive, appAuth)),
+    ]);
     waitUntil(work);
     await work;
   },

@@ -891,7 +891,16 @@ export type ResySnipeRow = {
   preferred_time: string | null;
   slot_types: string[] | null;
   max_deposit_cents: number;
-  drop_at: string;
+  /**
+   * Exactly ONE of these shapes is set — enforced by resy_snipes_timing_shape.
+   * `drop_at` is the exact instant, for a venue whose release time is genuinely
+   * known. The watch window is for the normal case where it isn't: Resy exposes
+   * no booking-window metadata, so a guessed second loses silently while a
+   * watched window only costs a few seconds of detection latency.
+   */
+  drop_at: string | null;
+  watch_from: string | null;
+  watch_until: string | null;
   status: "armed" | "firing" | "booked" | "missed" | "failed" | "cancelled";
   fired_at: string | null;
   resy_token: string | null;

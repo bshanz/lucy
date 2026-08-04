@@ -40,7 +40,15 @@ export default defineTool({
         window: `${formatTime(hhmm(s.earliest_time))}–${formatTime(hhmm(s.latest_time))}`,
         preferred: s.preferred_time ? formatTime(hhmm(s.preferred_time)) : null,
         maxDeposit: s.max_deposit_cents ? formatUsd(s.max_deposit_cents) : "none",
-        dropsAt: formatLocal(s.drop_at),
+        // One of two shapes. A precise drop is a moment; a watch is a window
+        // Lucy sits across because the venue's release time isn't known. Say
+        // which it is — "watching 8–11am" and "fires at 9:00" set very
+        // different expectations about how exact this is.
+        dropsAt: s.drop_at ? formatLocal(s.drop_at) : null,
+        watching:
+          s.watch_from && s.watch_until
+            ? `${formatLocal(s.watch_from)} until ${formatLocal(s.watch_until)}`
+            : null,
         status: s.status,
         // Only present once it has fired. Quote these rather than paraphrasing —
         // "you got 7:45 in the dining room" is the whole point of the feature.

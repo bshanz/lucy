@@ -75,6 +75,117 @@ async function seed(dropAt: Date): Promise<string> {
   return data.id as string;
 }
 
+const LEASE_STALE_MS = 90_000;
+
+/** Exactly the watch-mode lease resy-snipe.ts issues. Keep the two in step. */
+async function lease(now: number) {
+  const { data, error } = await supabase
+    .from("resy_snipes")
+    .update({ fired_at: new Date().toISOString() })
+    .eq("status", "armed")
+    .not("watch_from", "is", null)
+    .lte("watch_from", new Date(now).toISOString())
+    .gte("watch_until", new Date(now).toISOString())
+    .or(`fired_at.is.null,fired_at.lt.${new Date(now - LEASE_STALE_MS).toISOString()}`)
+    .select("id");
+  if (error) throw new Error(error.message);
+  return data ?? [];
+}
+
+async function seedWatch(from: Date, until: Date, firedAt: Date | null = null): Promise<string> {
+  const { data, error } = await supabase
+    .from("resy_snipes")
+    .insert({
+      channel: "imessage",
+      phone: "+10000000000",
+      venue_id: TEST_VENUE,
+      venue_name: "Lease Test (not a real venue)",
+      reservation_date: "2030-01-02",
+      party_size: 2,
+      earliest_time: "19:00",
+      latest_time: "21:00",
+      max_deposit_cents: 0,
+      drop_at: null,
+      watch_from: from.toISOString(),
+      watch_until: until.toISOString(),
+      fired_at: firedAt ? firedAt.toISOString() : null,
+    })
+    .select("id")
+    .single();
+  if (error) throw new Error(error.message);
+  return data.id as string;
+}
+
+/**
+ * Watch-mode rows are LEASED, not consumed.
+ *
+ * A watch spans hours across dozens of cron ticks, almost all of which see no
+ * inventory. If an empty minute consumed the row the way a precise snipe does,
+ * the snipe would die on its first tick and sit "missed" for hours while the
+ * tables it was waiting for came and went. Equally, two workers holding the same
+ * row at once could both reach /3/book — the exact double-booking the precise
+ * path's claim exists to prevent. So: status stays 'armed', and `fired_at` is a
+ * lease that expires.
+ */
+async function watchModeChecks(now: number): Promise<void> {
+  // Two concurrent workers, one open watch window → exactly one lease.
+  await seedWatch(new Date(now - 60_000), new Date(now + 600_000));
+  const [x, y] = await Promise.all([lease(now), lease(now)]);
+  check("two concurrent workers yield exactly one lease", x.length + y.length, 1);
+
+  // The row must still be armed — a leased minute is not a spent snipe.
+  const { data: still } = await supabase
+    .from("resy_snipes")
+    .select("status")
+    .eq("venue_id", TEST_VENUE)
+    .maybeSingle();
+  check("a leased watch row stays 'armed'", still?.status, "armed");
+
+  // Same minute, another worker: the lease is held, so nothing to take.
+  check("a held lease blocks a second worker", (await lease(now)).length, 0);
+
+  // Releasing (what runWatch does on an empty pass) frees it for the next tick.
+  await supabase.from("resy_snipes").update({ fired_at: null }).eq("venue_id", TEST_VENUE);
+  check("a released lease is re-takeable next tick", (await lease(now)).length, 1);
+  await cleanup();
+
+  // A worker that crashed mid-watch must not park the snipe forever.
+  await seedWatch(new Date(now - 60_000), new Date(now + 600_000), new Date(now - LEASE_STALE_MS - 10_000));
+  check("a stale lease is reclaimable", (await lease(now)).length, 1);
+  await cleanup();
+
+  // Windows bound the watching, in both directions.
+  await seedWatch(new Date(now + 600_000), new Date(now + 1_200_000));
+  check("a window that hasn't opened yet is not leased", (await lease(now)).length, 0);
+  await cleanup();
+
+  await seedWatch(new Date(now - 1_200_000), new Date(now - 600_000));
+  check("a window that already closed is not leased", (await lease(now)).length, 0);
+  await cleanup();
+
+  // The schema must refuse an ambiguous row: both shapes, or neither.
+  let bothRejected = false;
+  try {
+    await supabase
+      .from("resy_snipes")
+      .insert({
+        channel: "imessage", phone: "+10000000000", venue_id: TEST_VENUE,
+        venue_name: "Bad shape", reservation_date: "2030-01-03", party_size: 2,
+        earliest_time: "19:00", latest_time: "21:00", max_deposit_cents: 0,
+        drop_at: new Date(now + 60_000).toISOString(),
+        watch_from: new Date(now).toISOString(),
+        watch_until: new Date(now + 600_000).toISOString(),
+      })
+      .select("id")
+      .single()
+      .then((r) => { if (r.error) throw new Error(r.error.message); });
+  } catch (err) {
+    bothRejected = /resy_snipes_timing_shape|violates check/i.test(String(err));
+  }
+  check("a row with BOTH a drop time and a watch window is rejected", bothRejected, true);
+  await cleanup();
+}
+
 async function main(): Promise<void> {
   await cleanup(); // in case a previous run died mid-flight
 
@@ -137,6 +248,8 @@ async function main(): Promise<void> {
   }
   check("a finished snipe does not block re-arming the same table", reArmed, true);
   await cleanup();
+
+  await watchModeChecks(now);
 }
 
 main()
