@@ -177,6 +177,29 @@ function matchOption(text: string, options: PendingOption[]): string | undefined
   return undefined;
 }
 
+/**
+ * Maps the repair route's approve/deny intent onto a request's OWN option ids.
+ * Confirmation kinds don't share an id vocabulary — tool approvals use
+ * approve/deny, the session-limit continuation uses continue/stop — and eve
+ * drops a response whose optionId isn't one of that request's options, so
+ * sending the literal "approve" silently failed to resolve a limit prompt.
+ */
+const INTENT_SYNONYMS = {
+  approve: ["approve", "continue", "allow", "yes"],
+  deny: ["deny", "stop", "reject", "no"],
+} as const;
+
+function resolveIntent(intent: "approve" | "deny", options: PendingOption[]): string | undefined {
+  // No options on the event (older shape) — fall back to the literal, which is
+  // what tool approvals, the only kind that predates this, expect anyway.
+  if (options.length === 0) return intent;
+  const wanted: readonly string[] = INTENT_SYNONYMS[intent];
+  return (
+    options.find((o) => wanted.includes(o.id.toLowerCase()))?.id ??
+    options.find((o) => wanted.includes(o.label.toLowerCase()))?.id
+  );
+}
+
 async function matchPendingResponses(
   phone: string,
   text: string,
@@ -251,12 +274,16 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       if (tail < 0) return Response.json({ error: "empty event stream" }, { status: 404 });
       const stream = await session.getEventStream({ startIndex: 0 });
       const reader = stream.getReader();
-      let latest: { requestId: string }[] | undefined;
+      let latest: PendingRequest[] | undefined;
       for (let i = 0; i <= tail; i++) {
         const { done, value } = await reader.read();
         if (done) break;
         if (value.type === "input.requested") {
-          latest = value.data.requests.map((r) => ({ requestId: r.requestId }));
+          // Carry the options through: they're what the intent resolves against.
+          latest = value.data.requests.map((r) => ({
+            requestId: r.requestId,
+            options: (r.options ?? []).map((o) => ({ id: o.id, label: o.label })),
+          }));
         }
       }
       await reader.cancel().catch(() => {});
@@ -264,7 +291,16 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
         return Response.json({ error: "no input.requested event in stream" }, { status: 404 });
       }
 
-      const responses = latest.map((r) => ({ requestId: r.requestId, optionId: option }));
+      const responses = latest.flatMap((r) => {
+        const optionId = resolveIntent(option, r.options);
+        return optionId === undefined ? [] : [{ requestId: r.requestId, optionId }];
+      });
+      if (responses.length === 0) {
+        return Response.json(
+          { error: `no option matches "${option}"`, requests: latest },
+          { status: 409 },
+        );
+      }
       await send(
         { inputResponses: responses },
         { auth: sendblueAuth(phone), continuationToken: repairToken, state: { phone } },
@@ -389,26 +425,36 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       }
       for (const request of data.requests) {
         const lines: string[] = [];
+        const options = request.options ?? [];
         if (request.display === "confirmation") {
-          lines.push(`⚠️ Approval needed: ${request.action.toolName}`);
+          // eve writes a prompt per confirmation kind — "Approve tool call: X"
+          // for tool approvals, a paragraph explaining the guardrail for the
+          // session-limit continuation. Rendering toolName instead turned that
+          // last one into "session_limit_continuation" plus raw numbers.
+          lines.push(`⚠️ ${request.prompt || `Approval needed: ${request.action.toolName}`}`);
+          // Keep the call input: "Approve tool call: Bash" is not enough to
+          // approve on — the owner needs to see the command itself.
           for (const [key, value] of Object.entries(request.action.input ?? {})) {
             const text = typeof value === "string" ? value : JSON.stringify(value);
             lines.push(`${key}: ${text.length > 1200 ? `${text.slice(0, 1200)}…` : text}`);
           }
-          lines.push(`Reply "approve" to run it or "deny" to skip.`);
         } else {
           lines.push(request.prompt);
-          const options = request.options ?? [];
-          options.forEach((option, index) => {
-            lines.push(`${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`);
-          });
-          if (options.length > 0) {
-            lines.push(
-              request.allowFreeform
-                ? "Reply with a number, or answer in your own words."
-                : "Reply with a number.",
-            );
-          }
+        }
+        // Always list the request's own options rather than hardcoding
+        // approve/deny: ids and labels vary by kind (approve/deny → Yes/No for
+        // tools, continue/stop → Approve/Stop for the session limit), and
+        // matchOption only resolves an id, a label, or a 1-based index. The old
+        // hardcoded 'reply "deny"' matched nothing on a session-limit prompt.
+        options.forEach((option, index) => {
+          lines.push(`${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`);
+        });
+        if (options.length > 0) {
+          lines.push(
+            request.allowFreeform
+              ? "Reply with a number or option name, or answer in your own words."
+              : "Reply with a number or option name.",
+          );
         }
         await channel.reply(lines.join("\n"));
       }
