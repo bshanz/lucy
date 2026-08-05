@@ -71,6 +71,21 @@ const WATCH_POLL_INTERVAL_MS = 3_000;
 const LEASE_STALE_MS = 90_000;
 /** Re-attempts of the SAME slot after a request that never arrived. Bounded, but not zero. */
 const MAX_TRANSPORT_RETRIES = 2;
+/**
+ * A watch longer than this isn't waiting for a drop — it's waiting for a
+ * CANCELLATION, and the right cadence is completely different.
+ *
+ * A drop is a known ~90-minute window where inventory appears at one instant, so
+ * polling every 3s is proportionate: ~1,800 requests, once. A cancellation watch
+ * runs for days or weeks with no expected moment, and that same cadence would be
+ * ~29,000 requests a day against a WAF, indefinitely — which is both rude and a
+ * good way to get an account flagged.
+ *
+ * So the window length itself selects the cadence: short window → tight poll,
+ * long window → one poll per cron tick (~1/min), which needs no extra machinery
+ * because the cron already ticks every minute.
+ */
+const DROP_WINDOW_MAX_MS = 6 * 3600_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 
@@ -317,12 +332,19 @@ async function runWatch(
     return;
   }
 
-  const until = Math.min(
-    Date.now() + WATCH_PASS_MS,
-    Date.parse(snipe.watch_until!), // never poll past the owner's window
-  );
+  // Cancellation watches take a single look per tick; drop watches hold the
+  // invocation and poll hard. See DROP_WINDOW_MAX_MS.
+  const windowMs = Date.parse(snipe.watch_until!) - Date.parse(snipe.watch_from!);
+  const isCancellationWatch = windowMs > DROP_WINDOW_MAX_MS;
 
-  while (Date.now() < until) {
+  const until = isCancellationWatch
+    ? Date.now() // one pass, then release
+    : Math.min(
+        Date.now() + WATCH_PASS_MS,
+        Date.parse(snipe.watch_until!), // never poll past the owner's window
+      );
+
+  do {
     let slots: ResySlot[] = [];
     try {
       slots = await findSlots({
@@ -352,8 +374,9 @@ async function runWatch(
       await finish({ ...snipe, detected_at: detectedAt }, outcome, receive, appAuth);
       return;
     }
+    if (isCancellationWatch) break;
     await sleep(WATCH_POLL_INTERVAL_MS);
-  }
+  } while (Date.now() < until);
 
   // Window still open, nothing yet: release the lease for the next tick. This is
   // the whole reason watch rows keep status 'armed' — a status flip here would
