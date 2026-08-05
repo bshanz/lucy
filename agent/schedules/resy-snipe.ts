@@ -12,6 +12,7 @@ import {
   book,
   depositWithinBounds,
   describeSlot,
+  findReservationFor,
   findSlots,
   formatTime,
   formatUsd,
@@ -68,6 +69,8 @@ const WATCH_PASS_MS = 50_000;
 const WATCH_POLL_INTERVAL_MS = 3_000;
 /** A watch lease older than this was orphaned; let another worker take the row. */
 const LEASE_STALE_MS = 90_000;
+/** Re-attempts of the SAME slot after a request that never arrived. Bounded, but not zero. */
+const MAX_TRANSPORT_RETRIES = 2;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 
@@ -91,7 +94,15 @@ async function dispatch(
 }
 
 type RaceOutcome =
-  | { kind: "booked"; slot: ResySlot; resyToken: string; reservationId: string | null; depositCents: number }
+  | {
+      kind: "booked";
+      slot: ResySlot;
+      resyToken: string;
+      reservationId: string | null;
+      depositCents: number;
+      /** Won, but only discovered by verifying after a timed-out write. */
+      recovered?: boolean;
+    }
   | { kind: "missed"; reason: string; attempts: number }
   | { kind: "failed"; reason: string; attempts: number };
 
@@ -161,6 +172,7 @@ async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
   }
 
   let lastReason = "every table we tried was taken first";
+  let retriedTransport = 0;
   const candidates = ranked.slice(0, MAX_BOOK_ATTEMPTS);
 
   for (let i = 0; i < candidates.length; i++) {
@@ -200,6 +212,36 @@ async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
       };
     } catch (err) {
       if (err instanceof ResyError) {
+        // ⚠️ A TIMEOUT IS NOT A FAILURE — it is an unknown. The request may have
+        // reached Resy and committed before we stopped waiting. On 2026-08-05
+        // exactly that happened: /3/book aborted client-side at 3s, Resy booked
+        // the table anyway, the owner was charged $54.44, and the snipe told him
+        // it had lost. Never announce a loss on a timed-out write without
+        // asking the account what actually happened.
+        if (err.kind === "transport") {
+          const existing = await findReservationFor(snipe.venue_id, snipe.reservation_date).catch(
+            () => null,
+          );
+          if (existing) {
+            return {
+              kind: "booked",
+              slot: { ...slot, time: existing.time ?? slot.time, type: existing.slotType ?? slot.type },
+              resyToken: existing.resyToken,
+              reservationId: existing.reservationId,
+              depositCents: 0, // unknown from this path; the confirmation carries the real figure
+              recovered: true,
+            };
+          }
+          // Genuinely didn't land. The slot may well still be there, so retry
+          // THIS one rather than skipping to the next — moving on is right for a
+          // slot someone else took, not for a request that never arrived.
+          lastReason = "Resy stopped responding while we were booking";
+          if (retriedTransport < MAX_TRANSPORT_RETRIES) {
+            retriedTransport++;
+            i--;
+          }
+          continue;
+        }
         if (err.kind === "gone") {
           lastReason = "every table we tried was taken first";
           continue; // the normal way a race is lost
@@ -388,6 +430,12 @@ async function finish(
         (outcome.depositCents > 0 ? `, ${formatUsd(outcome.depositCents)} deposit taken` : "") +
         `. Text him the good news in one or two short lines — the restaurant, the day, the time, ` +
         `the party size. Use ONLY these details and don't invent an address or a dress code.` +
+        (outcome.recovered
+          ? ` NOTE: Resy stopped responding mid-booking and we only confirmed this by checking ` +
+            `his account afterwards, so the reservation is real but the charge amount isn't ` +
+            `known from here. Mention that a card may have been charged and he can see the ` +
+            `exact figure in the Resy app — do NOT quote a number.`
+          : "") +
         measured
       : `A reservation snipe just LOST: ${snipe.venue_name} on ${snipe.reservation_date} for ` +
         `${snipe.party_size}, wanted between ${formatTime(hhmm(snipe.earliest_time))} and ` +

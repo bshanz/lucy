@@ -34,8 +34,21 @@ import { ownerWallClockToUtc } from "#lib/reminders.js";
 const RESY_API = "https://api.resy.com";
 const RESY_WEB = "https://resy.com";
 const REQUEST_TIMEOUT_MS = 10_000;
-/** The drop race runs on a stopwatch; a 10s timeout there would be a hang. */
-const RACE_TIMEOUT_MS = 3_000;
+/**
+ * Race timeouts, split because the two kinds of call want opposite things.
+ *
+ * /4/find is polled in a loop, so a short leash is right: a slow response is
+ * cheap to abandon and retry 250ms later.
+ *
+ * ⚠️ /3/details and /3/book are ONE-SHOT and must NOT share that leash. They are
+ * the heaviest endpoints (details returns venue+payment+user in one payload) and
+ * they are hammered by everyone at the exact second of a drop, so they are
+ * slowest precisely when they matter. On 2026-08-05 a 3s cap on /3/book aborted
+ * the client while Resy went on to commit the booking — the table was won, the
+ * owner was charged, and the snipe reported a clean miss. Give writes room.
+ */
+const RACE_FIND_TIMEOUT_MS = 3_000;
+const RACE_WRITE_TIMEOUT_MS = 12_000;
 
 /**
  * Chrome UA.
@@ -705,7 +718,7 @@ export async function findSlots(args: {
       party_size: args.partySize,
       venue_id: args.venueId,
     },
-    timeoutMs: args.fast ? RACE_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+    timeoutMs: args.fast ? RACE_FIND_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
   });
   return parseSlots(payload);
 }
@@ -772,7 +785,7 @@ export async function slotDetails(args: {
   const body = await resyFetch<any>("/3/details", {
     method: "POST",
     json: { config_id: args.configToken, day: args.day, party_size: args.partySize },
-    timeoutMs: args.fast ? RACE_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+    timeoutMs: args.fast ? RACE_WRITE_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
   });
 
   const bookToken = body?.book_token?.value;
@@ -829,7 +842,7 @@ export async function book(args: {
   const body = await resyFetch<any>("/3/book", {
     method: "POST",
     form,
-    timeoutMs: args.fast ? RACE_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
+    timeoutMs: args.fast ? RACE_WRITE_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
   });
 
   const resyToken = body?.resy_token;
@@ -846,21 +859,59 @@ export async function cancelBooking(resyToken: string): Promise<void> {
 
 export type Reservation = {
   resyToken: string;
-  venueName: string;
+  reservationId: string | null;
+  venueId: number | null;
+  venueName: string | null;
   day: string;
   time: string | null;
   partySize: number | null;
+  slotType: string | null;
 };
 
-export async function myReservations(): Promise<Reservation[]> {
-  const body = await resyFetch<any>("/3/user/reservations", { query: { limit: 50, offset: 1 } });
+/**
+ * The owner's reservations.
+ *
+ * ⚠️ Defaults to UPCOMING. Without `type` the endpoint returns history, which is
+ * useless for the two things this is actually for — "what do I have booked?" and
+ * verifying that a timed-out booking landed.
+ *
+ * ⚠️ `venue` here is `{id, currency}` with NO name; the time is `time_slot`, not
+ * `date.start`. An earlier parser read both from the wrong place and returned
+ * every row as "Unknown" at an unparseable date, which is exactly why a booking
+ * that timed out couldn't be confirmed against the account.
+ */
+export async function myReservations(type: "upcoming" | "past" = "upcoming"): Promise<Reservation[]> {
+  const body = await resyFetch<any>("/3/user/reservations", {
+    query: { limit: 50, offset: 1, type },
+  });
   return (body?.reservations ?? []).map((r: any) => ({
     resyToken: String(r?.resy_token ?? ""),
-    venueName: String(r?.venue?.name ?? "Unknown"),
-    day: String(r?.day ?? r?.date?.start ?? "").slice(0, 10),
-    time: slotTime(r?.date?.start),
+    reservationId: r?.reservation_id != null ? String(r.reservation_id) : null,
+    venueId: typeof r?.venue?.id === "number" ? r.venue.id : null,
+    venueName: r?.venue?.name ?? null,
+    day: String(r?.day ?? "").slice(0, 10),
+    time: slotTime(r?.time_slot),
     partySize: typeof r?.num_seats === "number" ? r.num_seats : null,
+    slotType: r?.config?.type ?? null,
   }));
+}
+
+/**
+ * Did we already book this venue on this day? The answer to "the write timed
+ * out — did it land?"
+ *
+ * A timeout on /3/book is NOT a failure. It is an UNKNOWN: the request may have
+ * reached Resy and committed before the client gave up waiting. Treating that as
+ * a loss is how a snipe reports a miss for a table the owner now holds and has
+ * been charged for. Any write that times out must be verified against the
+ * account before its outcome is announced.
+ */
+export async function findReservationFor(
+  venueId: number,
+  day: string,
+): Promise<Reservation | null> {
+  const mine = await myReservations("upcoming");
+  return mine.find((r) => r.venueId === venueId && r.day === day) ?? null;
 }
 
 // ---------------------------------------------------------------------------
