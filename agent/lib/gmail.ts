@@ -342,3 +342,27 @@ export async function sendEmail(raw: string): Promise<void> {
     body: JSON.stringify({ raw }),
   });
 }
+
+/**
+ * Has an email with this recipient and subject left the mailbox in the last day?
+ *
+ * ⚠️ A SEND THAT DIED MID-FLIGHT IS AN UNKNOWN, NOT A FAILURE. The request may
+ * have reached Gmail and committed before the invocation was killed. Retrying
+ * blind mails the person twice; reporting a failure blind tells the owner his
+ * email didn't go when it did — and he acts on that, by resending or by not
+ * following up. This is the same lesson as findReservationFor() in #lib/resy.js,
+ * learned the same way: ask the account what actually happened.
+ *
+ * Best-effort by nature. It matches on recipient and subject, so two identical
+ * subjects to the same person inside 24h are indistinguishable — which is why
+ * the caller reports uncertainty rather than asserting, and never re-sends off
+ * the back of a negative.
+ */
+export async function findSentMessage(to: string, subject: string): Promise<boolean> {
+  // Gmail's `subject:` operator is word-based, not literal, even when quoted:
+  // punctuation is dropped and the phrase must be quoted to stay a phrase.
+  const phrase = subject.replace(/"/g, " ").trim();
+  const q = `in:sent to:${to} subject:"${phrase}" newer_than:1d`;
+  const found = await listMessageIds(q, 1);
+  return found.length > 0;
+}

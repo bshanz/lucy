@@ -22,7 +22,7 @@ Built on [eve](https://vercel.com/docs) (Vercel's durable-agent framework), [Sen
 - **iMessage channel** - text a number, get an assistant. Free Sendblue sandbox works (fast-polling ingress, ~10–20s replies, read receipts, typing indicators, Unicode-bold rendering since iMessage has no markdown). A dormant webhook route is included for Sendblue's paid plan (~5s replies) - flipping over is one CLI command.
 - **Slack channel** - instant DMs via eve's built-in Slack channel; human-in-the-loop approvals render as real buttons.
 - **Reminders with follow-through** - natural language in, DST-proof scheduling out (`daily`, `weekly`, `weekdays`, `monthly`, `every_N_days`). One-off reminders stay open until you confirm; silence earns up to three nudges on a widening curve (a day, then three days, then a week, the last one announced as the last, all clamped to waking hours), after which the reminder stops chasing you but stays on your list. "Push it to Friday" reschedules conversationally and restarts the cycle.
-- **Gmail** - search, read (quoted-history stripped), and send/reply. Sends are **always approval-gated**, and email content is treated as untrusted input (the persona explicitly refuses instructions embedded in emails).
+- **Gmail** - search, read (quoted-history stripped), and send/reply. Sends are **always approval-gated**, and email content is treated as untrusted input (the persona explicitly refuses instructions embedded in emails). Email can also be **scheduled** - "email Bob at 9 tomorrow" - and that moves the approval card *earlier* rather than deferring it: you approve the finished draft now, and at 9am it sends unattended with no second prompt. Same trust model as sniping (you approve the watch, not the booking), and it holds for the same reason - the sender can only replay. There is no model in the loop at send time, so the bytes on the card are the bytes that arrive.
 - **Google Calendar + Tasks** - list, create, and update events, manage the default task list. One OAuth grant covers all three Google services. Events can carry **guests**: pass attendees and Google sends the real invitations, and adding, removing, or rescheduling anyone lands behind an approval card first, since every one of those actions mails a person who isn't you. Solo events stay unprompted. Lucy will not invent an address to invite - she resolves it from memory or your Gmail, or asks.
 - **Memory + diary** - durable facts (`remember`) and timestamped moments (`log_moment`) in separate stores, both recallable conversationally ("what did I do last weekend?").
 - **Flight price tracking** - price any route on demand, or watch up to 6 and get texted unprompted when a fare is genuinely notable. Google Flights (via SerpAPI) returns its own `typical_price_range` in the same call, so "is $613 good for this route?" is answerable on the *first* check with no accumulated history. Alerts are edge-triggered, not level-triggered: a fare parked below the typical range texts you once, not every day for six weeks.
@@ -260,6 +260,7 @@ The webhook and the poller share the same dedupe table, so they safely coexist -
 
 - Sender allowlisting happens **in code, before the model**: unknown iMessage senders and Slack users are dropped at ingress, not argued with by the prompt.
 - Email content is treated as untrusted input; the persona refuses instructions embedded in mail. Outbound email is approval-gated per send.
+- A **scheduled** email is authorised once, at the point it's drafted, and the row that stores it is the authorisation. The cron that sends it runs no model: recipient, subject and body are read back out and posted verbatim. That's a deliberately narrower bound than "skip approval on cron-dispatched turns" would be — that alternative constrains *when* a send may happen and nothing about *what* or *to whom*, on turns whose context routinely contains untrusted email. An interrupted send is treated as an unknown rather than a failure: Lucy checks the Sent folder before saying anything, never auto-retries, and reports "I can't tell" out loud when she can't tell.
 - eve's HTTP surface fails closed in production; the webhook/authorize routes require a bearer secret (timing-safe comparison).
 - Google credentials never touch app env - Vercel Connect stores and refreshes the grant server-side; the app only ever sees short-lived access tokens.
 - Resy login credentials are **never tool arguments**. The phone and email come from `OWNER_PHONE`/`OWNER_EMAIL`; together they are the entire credential, so nothing that talks its way into a prompt can redirect a login code to a device someone else holds. The stored session token never reaches the model - it can book, cancel, and read payment methods, so every error message is built through a redactor.
@@ -281,12 +282,16 @@ agent/
   schedules/
     sendblue-poll.ts     # fast-poll ingress: 5 passes × 10s per minute-cron
     reminder-poll.ts     # delivers due reminders + escalating follow-ups
+    email-send.ts        # minute cron; sends pre-approved email verbatim, no
+                         #   model in the loop; resolves an interrupted send by
+                         #   asking Gmail rather than guessing
     flight-poll.ts       # daily flight price checks, quota-aware, edge-triggered
     resy-snipe.ts        # minute cron; claims imminent drops, then sleeps to the
                          #   exact millisecond and races find -> details -> book
     resy-auth.ts         # daily; session liveness + 7/3/1-day expiry warnings
-  tools/                 # reminders, memory, diary, gmail, calendar, tasks,
-                         #   flights, resy (search/availability/book/snipe/cancel)
+  tools/                 # reminders, memory, diary, gmail (send/reply/schedule),
+                         #   calendar, tasks, flights,
+                         #   resy (search/availability/book/snipe/cancel)
   lib/                   # sendblue/gmail/serpapi/resy clients, tz math, supabase,
                          #   formatting; resy.ts also holds the pure ranking logic,
                          #   calendar.ts the guest-list merge rules
@@ -296,6 +301,8 @@ scripts/
   check-calendar-logic.ts # pure checks: guest-list normalise/merge, duration on a move
   check-resy-logic.ts    # pure checks: slot ranking, deposit cap, DST, unit boundary
   check-resy-claim.ts    # proves two concurrent crons can't double-book a table
+  check-email-claim.ts   # proves two concurrent crons can't double-send a
+                         #   scheduled email; sends nothing, .invalid recipients
   check-resy-live.ts     # live ladder; stops before /3/book on purpose
 supabase/migrations/     # schema
 ```
