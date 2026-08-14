@@ -24,7 +24,6 @@ Built on [eve](https://vercel.com/docs) (Vercel's durable-agent framework), [Sen
 - **Reminders with follow-through** - natural language in, DST-proof scheduling out (`daily`, `weekly`, `weekdays`, `monthly`, `every_N_days`). One-off reminders stay open until you confirm; silence earns up to three nudges on a widening curve (a day, then three days, then a week, the last one announced as the last, all clamped to waking hours), after which the reminder stops chasing you but stays on your list. "Push it to Friday" reschedules conversationally and restarts the cycle.
 - **Gmail** - search, read (quoted-history stripped), and send/reply. Sends are **always approval-gated**, and email content is treated as untrusted input (the persona explicitly refuses instructions embedded in emails). Email can also be **scheduled** - "email Bob at 9 tomorrow" - and that moves the approval card *earlier* rather than deferring it: you approve the finished draft now, and at 9am it sends unattended with no second prompt. Same trust model as sniping (you approve the watch, not the booking), and it holds for the same reason - the sender can only replay. There is no model in the loop at send time, so the bytes on the card are the bytes that arrive.
 - **Google Calendar + Tasks** - list, create, and update events, manage the default task list. One OAuth grant covers all three Google services. Events can carry **guests**: pass attendees and Google sends the real invitations, and adding, removing, or rescheduling anyone lands behind an approval card first, since every one of those actions mails a person who isn't you. Solo events stay unprompted. Lucy will not invent an address to invite - she resolves it from memory or your Gmail, or asks.
-- **Texting other people** - "text Alex I'm running 15 late" sends now; "text Alex at 8 tomorrow" queues and fires unattended, same approve-the-draft-not-the-send trade as scheduled email. The first message to a number carries **the assistant's own contact card** as a vCard, so one tap turns every later text from an unknown number into a name. The card is the assistant's, not the owner's: his name goes in the `ORG` line, the phone number on it is the Sendblue line, and his personal mobile and address are on it nowhere - which is checked, not merely intended, because Sendblue hosts the card at a public unauthenticated URL. An optional avatar is embedded base64 (`scripts/set-contact-photo.ts`), stored in Supabase rather than committed or stuffed into env. The card is built from the tool's input, so the check that the message is well-formed runs in the *approval policy*, before any card is drawn - which is what lets the guarantee be the strong one: **the characters on the card are the characters that arrive**, with nothing added afterwards. These leave from Lucy's Sendblue line rather than your phone, so the first message to any number is required to open with a fixed sentence introducing you, and the tool refuses until it does. A ten-digit number with no country code is accepted only if *your* number is North American; everywhere else it's refused rather than guessed, because guessing a country code means sending your words to whoever holds that number there.
 - **Memory + diary** - durable facts (`remember`) and timestamped moments (`log_moment`) in separate stores, both recallable conversationally ("what did I do last weekend?").
 - **Flight price tracking** - price any route on demand, or watch up to 6 and get texted unprompted when a fare is genuinely notable. Google Flights (via SerpAPI) returns its own `typical_price_range` in the same call, so "is $613 good for this route?" is answerable on the *first* check with no accumulated history. Alerts are edge-triggered, not level-triggered: a fare parked below the typical range texts you once, not every day for six weeks.
 - **Restaurant reservations (Resy)** - search, check availability, book, and cancel on your own Resy account. The real feature is **sniping**: hard tables drop at an exact second weeks in advance and are gone in under ten, which is far less time than an approval round-trip over iMessage. So you approve the *watch*, not the booking - venue, date, party size, time window, deposit cap - and at the drop moment Lucy books unattended inside those bounds and texts you the result, win or lose. The time window is a hard bound, not a preference: a table outside it is one you never authorised. Venue constraints are checked at arm time rather than discovered at T-0, because some venues gate booking behind a reCAPTCHA (this varies *between locations of the same restaurant* - Carbone NYC can be sniped, Carbone Miami can't) and arming a snipe that was never going to work is worse than refusing it. You link the account **by conversation, not by config**: Resy signs in with a texted code, so you say "connect resy", she has Resy text your phone, and you text the six digits back. That session lasts ~45 days and, on a code-linked account, genuinely cannot renew itself - Resy issues no refresh token - so Lucy watches the clock and nudges you at 7, 3 and 1 days out rather than letting a snipe discover it at 9am on drop day.
@@ -54,12 +53,6 @@ Slack    ⇄ Vercel Connect–brokered webhooks          │
    the exact millisecond before racing /4/find → /3/details → /3/book
    resy-auth cron: hourly, acts at 4am owner-local; probes the session and
    warns at 7/3/1 days - a code-linked session has no refresh token to roll
-
-   text-send cron: every minute; replays pre-approved texts to other people
-   verbatim, no model in the loop; an interrupted send is resolved by asking
-   Sendblue what it actually sent, never by retrying
-   text-replies cron: every minute; sends each new correspondent ONE fixed
-   line, then relays what they said to the owner as untrusted third-party text
 ```
 
 Design decisions worth knowing about (they're where the bugs live):
@@ -76,8 +69,6 @@ Design decisions worth knowing about (they're where the bugs live):
 - **The pre-warm is what wins the table, not the polling loop.** Scraping the key is two round trips and refreshing the token is a third; paying for those at T-0 loses the race. `resy-snipe` claims the row ~90s early, warms everything ~10s early, then holds the invocation and sleeps to the exact millisecond before it starts asking. Vercel cron only fires once a minute - the in-invocation hold is what turns that into second-level precision, the same trick `sendblue-poll` uses for latency.
 
 - **The spending cap is enforced on a field that actually exists, in units that were checked.** Two bugs here were live at once and neither raised an error. The card was attached only when a deposit looked due - but plenty of venues want a card *on file* to hold a **free** table and charge only for a no-show, and Resy answers a missing one with a bare `402` that is indistinguishable from a real deposit demand, so booking failed *and* the error text confidently told the owner he had no card while two sat on his account. Meanwhile the charge was read from `config.deposit_fee`, a field on no Resy response, so every venue priced as $0 and the cap was never enforced at all: a **$400** prix fixe would have walked straight through a $50 limit. The real amount is `payment.amounts.total`, in **dollars** while everything here counts integer cents - one conversion boundary, now its own function with tests against verbatim live payloads. The general lesson, and the reason this bullet exists: a plausible-looking field name that doesn't exist fails *silently and permissively*, and money code is where that is least survivable.
-
-- **The approval card is built from the tool's input, which decides where validation goes.** On iMessage there are no buttons, so `input.requested` renders the call by iterating `request.action.input` and printing each key. That is a nicer property than it looks: whatever the model passed is exactly what you read. But it means a tool that tidies its own input inside `execute` — prepending a line, stripping markdown — is showing you one message and sending another, and for a text to another person that is the whole ballgame. So `send_text`/`schedule_text` don't compose, they *verify*: the model must pass the finished message, and the check runs in the `approval` policy (which can return `{ type: "denied", reason }`) so a malformed one is bounced back to the model **before** a card exists. You never see a card that isn't byte-identical to what sends. The cost is one extra round trip the first time you text someone; the alternative was a footnote explaining why the message you approved isn't the message that arrived.
 
 - **Personal data lives in env, not code.** The committed persona (`agent/instructions.ts`) is fully generic; `agent/instructions/owner.ts` injects the owner's name/email/timezone at runtime from `OWNER_*` vars. (Build-time templating doesn't work here: eve evaluates instruction modules in an env-less sandbox at build.)
 
@@ -168,19 +159,7 @@ sendblue show-keys                       # → SENDBLUE_API_KEY_ID / SECRET
 sendblue lines                           # → SENDBLUE_FROM_NUMBER
 ```
 
-- ⚠️ The free sandbox is **inbound-first**: your phone is auto-verified by the signup text; anyone else must text your line once before it can message them. For a single-owner assistant that's a feature - but it's also the one prerequisite for `send_text`, so a friend you want Lucy to text has to send one message to your line first. Their message is dropped before the model sees it, exactly as any non-owner message is; Sendblue still records the contact, and it holds from then on.
-
-  **There is no way around this on the free plan, and the near-misses are worth writing down** because all three look like they should work. Verified against the live API, not inferred:
-
-  | Attempt | Result |
-  | --- | --- |
-  | `POST /api/send-message` to a non-contact | `400` — `"This contact must be verified before sending messages to it."` |
-  | `POST /api/v2/contacts` (i.e. `sendblue add-contact`) | `200 OK`, contact created… and the send is **still** refused with the same error |
-  | `POST /api/v2/contacts/verify` | `"No contact found for this number"` — even for a contact that was just created and reads back fine from `GET /api/v2/contacts/{number}` |
-
-  So adding a contact registers a name, not a permission, and the endpoint that sounds like the bootstrap path isn't one. The only thing that verifies a contact is an inbound text from them. Lifting it means a dedicated line ($100/mo), which raises the ceiling to 50 new contacts/day; the other way out is a different carrier entirely, which for US SMS means A2P 10DLC registration and green bubbles.
-
-  Lucy handles this in two places rather than one: `contactBlock()` refuses a send to a number Sendblue has never heard of **before the approval card is drawn** (a definite no - `GET /api/v2/contacts/{number}` 404s cleanly - and never a green light, since the table above shows a known contact can still be unsendable), and `explainSendFailure()` catches the rest against the verbatim error string above, which `check-text-claim.ts` pins so a reword gets noticed.
+- ⚠️ The free sandbox is **inbound-first**: your phone is auto-verified by the signup text; anyone else must text your line once before it can message them. (For a single-owner assistant this is a feature.)
 - ⚠️ Phone-created accounts get a synthetic `phone-...@agents.sendblue.com` email that **cannot receive dashboard sign-in links**. If you ever need the web dashboard (e.g. to upgrade plans), email support to attach a real address - don't create a second account with your email, it won't contain your line.
 
 ### 4. Vercel project
@@ -242,9 +221,6 @@ Verify without booking anything:
 npx tsx scripts/check-calendar-logic.ts                      # guest-list logic, no network
 npx tsx scripts/check-resy-logic.ts                          # pure logic, no network
 npx tsx --env-file=.env.local scripts/check-resy-claim.ts    # no double-booking
-npx tsx --env-file=.env.local scripts/check-email-claim.ts   # no double-sent email
-npx tsx --env-file=.env.local scripts/check-text-claim.ts    # no double-sent text
-npx tsx --env-file=.env.local scripts/check-contact-card.ts  # vCard shape + folding
 npx tsx --env-file=.env.local scripts/check-resy-live.ts     # live, stops before /3/book
 ```
 
@@ -285,11 +261,6 @@ The webhook and the poller share the same dedupe table, so they safely coexist -
 - Sender allowlisting happens **in code, before the model**: unknown iMessage senders and Slack users are dropped at ingress, not argued with by the prompt.
 - Email content is treated as untrusted input; the persona refuses instructions embedded in mail. Outbound email is approval-gated per send.
 - A **scheduled** email is authorised once, at the point it's drafted, and the row that stores it is the authorisation. The cron that sends it runs no model: recipient, subject and body are read back out and posted verbatim. That's a deliberately narrower bound than "skip approval on cron-dispatched turns" would be — that alternative constrains *when* a send may happen and nothing about *what* or *to whom*, on turns whose context routinely contains untrusted email. An interrupted send is treated as an unknown rather than a failure: Lucy checks the Sent folder before saying anything, never auto-retries, and reports "I can't tell" out loud when she can't tell.
-- **A reply from someone who isn't the owner never reaches a model as a peer.** Both ingress paths drop non-owner senders in code before dispatch, so a friend cannot ask Lucy anything — she does not read it. What she does instead is relay it: they get one **fixed, model-free** line saying the owner will see it, and he gets their words quoted to him inside explicit markers, dispatched under `appAuth` rather than his own identity so nothing in the text inherits his authority. The persona treats it as the same trust class as email content, with one addition that matters more here — *never answer a question about him yourself, even one you know the answer to.* She holds his calendar, mail, memories and diary; the person asking holds a phone number he gave them. Relaying is gated on numbers he has actually texted, because the line's number is sitting on a contact card in other people's phones and "someone texted it" is not consent to interrupt him.
-
-- **Adding a second kind of sender to an inbox silently broke the first.** The ingress poller read the newest 25 inbound messages and then filtered them to the owner. That was correct for exactly as long as the owner was the only person who ever texted the line — the moment friends could reply, their messages started consuming that window, and a busy evening would push the owner's own text out of it. He texts, nothing happens, and there is no error anywhere to notice it by. Fixed by scoping to his number server-side (`?number=`, verified honoured: a number with no history returns zero rows rather than the newest N) and keeping the client-side filter as the security boundary. `findSentText` had the same latent bug for the same reason, where a false "not found" would have told him a text hadn't sent when it had. Worth stating plainly because the bug wasn't in the new feature — it was in old code that the new feature invalidated an assumption of.
-
-- **Texting other people is the same bargain as scheduled email, with one extra edge.** Every send is approval-gated, a scheduled one is replayed verbatim by a cron with no model in the loop, and the persona refuses to send anything arming off text that arrived from someone other than the owner. The extra edge is that the recipient is a tool argument, so a wrong one reaches a real stranger rather than bouncing: hence numbers are normalised to E.164 or **refused**, never guessed into a country code, and the owner's own number is refused outright. What is deliberately *not* claimed here: the card protects against Lucy sending something you didn't approve, not against you approving something you'll regret.
 - eve's HTTP surface fails closed in production; the webhook/authorize routes require a bearer secret (timing-safe comparison).
 - Google credentials never touch app env - Vercel Connect stores and refreshes the grant server-side; the app only ever sees short-lived access tokens.
 - Resy login credentials are **never tool arguments**. The phone and email come from `OWNER_PHONE`/`OWNER_EMAIL`; together they are the entire credential, so nothing that talks its way into a prompt can redirect a login code to a device someone else holds. The stored session token never reaches the model - it can book, cancel, and read payment methods, so every error message is built through a redactor.
@@ -314,23 +285,16 @@ agent/
     email-send.ts        # minute cron; sends pre-approved email verbatim, no
                          #   model in the loop; resolves an interrupted send by
                          #   asking Gmail rather than guessing
-    text-send.ts         # minute cron; same contract for texts to other people,
-                         #   resolved against Sendblue's own record of what went
-    text-replies.ts      # minute cron; one fixed line back to a new correspondent,
-                         #   then relays their words to the owner as untrusted data
     flight-poll.ts       # daily flight price checks, quota-aware, edge-triggered
     resy-snipe.ts        # minute cron; claims imminent drops, then sleeps to the
                          #   exact millisecond and races find -> details -> book
     resy-auth.ts         # daily; session liveness + 7/3/1-day expiry warnings
   tools/                 # reminders, memory, diary, gmail (send/reply/schedule),
-                         #   texts to other people (send/schedule/list/cancel),
                          #   calendar, tasks, flights,
                          #   resy (search/availability/book/snipe/cancel)
   lib/                   # sendblue/gmail/serpapi/resy clients, tz math, supabase,
                          #   formatting; resy.ts also holds the pure ranking logic,
-                         #   calendar.ts the guest-list merge rules,
-                         #   outbound-text.ts the E.164 rules and the pre-card checks,
-                         #   contact-card.ts the vCard builder + upload cache
+                         #   calendar.ts the guest-list merge rules
 scripts/
   authorize-gmail.mjs    # mints the dev-environment Google grant
   connect-resy.ts        # links Resy from the CLI (--send is opt-in; it texts you)
@@ -339,11 +303,6 @@ scripts/
   check-resy-claim.ts    # proves two concurrent crons can't double-book a table
   check-email-claim.ts   # proves two concurrent crons can't double-send a
                          #   scheduled email; sends nothing, .invalid recipients
-  check-text-claim.ts    # same for texts, plus the E.164 rules and the pre-card
-                         #   checks; sends nothing, 555-0100 recipients (reserved)
-  check-contact-card.ts  # vCard structure, 75-octet folding, and that the card
-                         #   carries no personal number or address (--live: upload)
-  set-contact-photo.ts   # installs the avatar into channel_state (never committed)
   check-resy-live.ts     # live ladder; stops before /3/book on purpose
 supabase/migrations/     # schema
 ```
