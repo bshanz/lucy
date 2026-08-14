@@ -28,7 +28,13 @@ const PASSES = 6; // t = 0s..50s — the t=50s pass may overlap the next tick, b
 const PASS_INTERVAL_MS = 10_000;
 
 async function pollOnce(receive: ScheduleHandlerArgs["receive"], owner: string): Promise<void> {
-  const inbound = await fetchRecentInbound(25);
+  // Scoped to the owner SERVER-SIDE, not just filtered here. Since Lucy can text
+  // other people, this inbox has other senders in it, and an unscoped "newest 25"
+  // means a few friends replying at once pushes the owner's own message out of the
+  // window — he texts, nothing happens, and there is no error anywhere to see it
+  // by. The client-side filter below stays as the security boundary; this is only
+  // about not losing his messages.
+  const inbound = await fetchRecentInbound(25, owner);
 
   // Only the owner, only recent (poll window safety net), oldest first.
   const cutoff = Date.now() - 15 * 60 * 1000;
