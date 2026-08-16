@@ -71,6 +71,25 @@ export function nowInOwnerTz(): string {
   }).format(new Date());
 }
 
+/**
+ * The grounding line every ingress path attaches to a turn.
+ *
+ * Lucy has no clock of her own: eve puts no date in the system prompt, and the
+ * instructions are captured at build time, so without this she genuinely does
+ * not know what day it is and resolves "tomorrow" by shelling out to `date` in
+ * a Vercel sandbox — 30 seconds of cold start to learn something we already
+ * know. It lives on the message rather than in the instructions on purpose: a
+ * timestamp in an always-prepended system prompt changes every turn and
+ * invalidates the prompt cache for the whole conversation, where one attached
+ * to the newest message only ever appends.
+ *
+ * Every path that starts a turn must send it — the two channels do, and the
+ * evals import it so what they exercise is what production sends.
+ */
+export function ownerTimeContext(): string[] {
+  return [`Current local time: ${nowInOwnerTz()}.`];
+}
+
 /** Format a UTC timestamp in the owner's timezone for confirmations. */
 export function formatLocal(iso: string): string {
   return new Intl.DateTimeFormat("en-US", {

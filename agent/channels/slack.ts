@@ -1,6 +1,6 @@
 import { slackChannel, defaultSlackAuth, type SlackMessage } from "eve/channels/slack";
 import { connectSlackCredentials } from "@vercel/connect/eve";
-import { nowInOwnerTz } from "#lib/reminders.js";
+import { ownerTimeContext } from "#lib/reminders.js";
 
 /**
  * Slack channel — Lucy's instant surface. Credentials (bot token + webhook
@@ -37,7 +37,7 @@ export default slackChannel({
     if (!ownerOnly(message)) return null;
     return {
       auth: withChannelAttr(defaultSlackAuth(message, ctx), message),
-      context: [`Current New York time: ${nowInOwnerTz()}.`],
+      context: ownerTimeContext(),
     };
   },
 
@@ -45,7 +45,7 @@ export default slackChannel({
     if (!ownerOnly(message)) return null;
     return {
       auth: withChannelAttr(defaultSlackAuth(message, ctx), message),
-      context: [`Current New York time: ${nowInOwnerTz()}.`],
+      context: ownerTimeContext(),
     };
   },
 });
