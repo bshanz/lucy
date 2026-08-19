@@ -1,19 +1,13 @@
-import { ownerTimeContext } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
+import type { ObservedToolCall } from "../shared.js";
 
 /**
- * A turn shaped the way a real one arrives.
- *
- * The eval driver talks to the HTTP surface directly, which bypasses channel
- * ingress — so without this the agent is handed a message with no clock, which
- * is a situation the owner can never actually produce. An eval that skips it
- * doesn't test production, it tests a harness artifact: she goes and runs
- * `date` in a sandbox, and the eval scores behaviour nobody will ever see.
- * Same helper the sendblue and slack channels use, so drift is impossible.
+ * `asOwnerMessage` and `ObservedToolCall` moved to `evals/shared.ts` when the
+ * flights evals needed them too. Re-exported so these files keep importing
+ * everything from one place.
  */
-export function asOwnerMessage(text: string): { message: string; clientContext: string[] } {
-  return { message: text, clientContext: ownerTimeContext() };
-}
+export { asOwnerMessage } from "../shared.js";
+export type { ObservedToolCall } from "../shared.js";
 
 /**
  * Cleanup for the diary evals.
@@ -38,12 +32,6 @@ export function asOwnerMessage(text: string): { message: string; clientContext: 
  * The sweep is bounded by `since` as well as the marker so it can never reach a
  * row that predates the run.
  */
-
-/** The shape we need off an eval-observed tool call; matches `EveEvalToolCall`. */
-export interface ObservedToolCall {
-  readonly name: string;
-  readonly output: unknown;
-}
 
 /** `log_moment` returns `{ ok, id, loggedFor }`; tolerate a JSON-encoded output too. */
 function momentIdOf(output: unknown): string | null {
