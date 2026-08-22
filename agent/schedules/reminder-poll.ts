@@ -111,12 +111,22 @@ async function confirmDeliveries(): Promise<void> {
       continue;
     }
 
-    const landed = outbound.find(
-      (m) =>
-        m.to_number === reminder.phone &&
-        m.status !== "ERROR" &&
-        Date.parse(m.date_sent) > dispatchedAt,
-    );
+    // EARLIEST match, not the first one found. fetchRecentOutbound returns
+    // newest-first, so a plain .find() picks the most recent message since the
+    // dispatch — which is some later, unrelated reply whenever the conversation
+    // has moved on before this tick ran. Caught by a smoke test that stamped a
+    // reminder dispatched at 13:22:40 with a 13:41:26 delivery, 19 minutes off.
+    // The first thing to leave after a dispatch is the one that dispatch
+    // produced, and sent_at has to be that instant: the follow-up curve hangs
+    // off it, so a late stamp quietly delays every nudge that follows.
+    const landed = outbound
+      .filter(
+        (m) =>
+          m.to_number === reminder.phone &&
+          m.status !== "ERROR" &&
+          Date.parse(m.date_sent) > dispatchedAt,
+      )
+      .sort((a, b) => Date.parse(a.date_sent) - Date.parse(b.date_sent))[0];
     if (landed) {
       await markDelivered(reminder, landed.date_sent);
       continue;
