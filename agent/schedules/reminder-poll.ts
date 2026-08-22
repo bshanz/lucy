@@ -76,10 +76,15 @@ const MAX_RECURRING_ATTEMPTS = 2;
  * lands on the follow-up curve, so the owner is asked about it within the day.
  */
 async function confirmDeliveries(): Promise<void> {
+  // dispatched_at is non-null for exactly as long as something is awaiting
+  // confirmation, and both settle paths null it — so it is the whole predicate.
+  // It covers two shapes at once: a first delivery (status 'awaiting_delivery')
+  // and a follow-up nudge on an already-delivered reminder, which keeps status
+  // 'sent' so it goes on listing as awaiting confirmation while it waits.
   const { data, error } = await supabase
     .from("reminders")
     .select("*")
-    .eq("status", "awaiting_delivery");
+    .not("dispatched_at", "is", null);
   if (error) {
     console.error(`[reminder-poll] delivery lookup failed: ${error.message}`);
     return;
@@ -101,13 +106,17 @@ async function confirmDeliveries(): Promise<void> {
 
   for (const reminder of waiting) {
     const dispatchedAt = reminder.dispatched_at ? Date.parse(reminder.dispatched_at) : 0;
+    // 'sent' + a pending dispatch means the reminder itself already landed and
+    // what's in flight is a nudge about it.
+    const isNudge = reminder.status === "sent";
 
     // Slack has no outbound lookup wired here, so Slack reminders keep the old
     // optimistic contract: dispatched counts as delivered. Stated out loud
     // rather than silently assumed — this is the seam to close if Slack ever
     // becomes a primary surface.
     if (reminder.channel !== "imessage" || !reminder.phone) {
-      await markDelivered(reminder, reminder.dispatched_at ?? new Date().toISOString());
+      const at = reminder.dispatched_at ?? new Date().toISOString();
+      await (isNudge ? advanceFollowUp(reminder) : markDelivered(reminder, at));
       continue;
     }
 
@@ -128,13 +137,74 @@ async function confirmDeliveries(): Promise<void> {
       )
       .sort((a, b) => Date.parse(a.date_sent) - Date.parse(b.date_sent))[0];
     if (landed) {
-      await markDelivered(reminder, landed.date_sent);
+      await (isNudge ? advanceFollowUp(reminder) : markDelivered(reminder, landed.date_sent));
       continue;
     }
     // Still inside the grace window: the turn may simply not be finished.
     if (Date.now() - dispatchedAt < DELIVERY_GRACE_MS) continue;
-    await requeue(reminder);
+    await (isNudge ? requeueNudge(reminder) : requeue(reminder));
   }
+}
+
+/**
+ * A nudge was seen to land, so the curve finally moves: the count goes up and
+ * the next deadline is computed, or the reminder lapses because the curve is
+ * spent.
+ *
+ * This is the step that used to run on dispatch, and moving it here is the
+ * whole point. Advancing on dispatch meant three swallowed nudges walked a
+ * reminder straight to 'lapsed' — terminal, no further outreach — without the
+ * owner ever being asked once. The reminder stayed on his list looking like
+ * something he had ignored three times.
+ *
+ * Takes no delivery timestamp on purpose: the curve is offsets from sent_at,
+ * the moment the REMINDER landed, not the nudge. Anchoring a nudge to itself
+ * would stretch the schedule a little further every round.
+ */
+async function advanceFollowUp(reminder: ReminderRow): Promise<void> {
+  const attempt = reminder.follow_up_count + 1;
+  const next = reminder.sent_at ? nextFollowUpAt(reminder.sent_at, attempt) : null;
+  await supabase
+    .from("reminders")
+    .update({
+      follow_up_count: attempt,
+      next_follow_up_at: next,
+      dispatched_at: null,
+      delivery_attempts: 0,
+      ...(next ? {} : { status: "lapsed" }),
+    })
+    .eq("id", reminder.id);
+  console.log(
+    `[reminder-poll] follow-up ${attempt}/${MAX_FOLLOW_UPS} confirmed for ${reminder.id}` +
+      (next ? "" : " (lapsed — no further outreach)"),
+  );
+}
+
+/**
+ * A nudge went nowhere. Put the deadline back so the SAME nudge number is tried
+ * again — follow_up_count deliberately does not move, because nothing was
+ * asked.
+ *
+ * Backoff by pushing next_follow_up_at is safe here in a way it is not for a
+ * recurring reminder's fire_at: this is a derived deadline, not an anchor.
+ * advanceFollowUp recomputes it from (sent_at, count) on the next confirmed
+ * delivery, so a retry can shift a nudge later without bending the curve.
+ */
+async function requeueNudge(reminder: ReminderRow): Promise<void> {
+  const wait = backoffMinutes(reminder.delivery_attempts);
+  console.error(
+    `[reminder-poll] follow-up ${reminder.follow_up_count + 1}/${MAX_FOLLOW_UPS} for ` +
+      `${reminder.id} was dispatched but nothing reached ${reminder.phone} within ` +
+      `${DELIVERY_GRACE_MS / 1000}s. The agent session is probably parked and silently ` +
+      `queueing messages. Retrying the same nudge in ${wait}m.`,
+  );
+  await supabase
+    .from("reminders")
+    .update({
+      next_follow_up_at: new Date(Date.now() + wait * 60_000).toISOString(),
+      dispatched_at: null,
+    })
+    .eq("id", reminder.id);
 }
 
 /**
@@ -325,11 +395,16 @@ export default defineSchedule({
     // null against <= now. On failure it's recomputed from (sent_at, count),
     // which is why the curve is stored as offsets from sent_at rather than as a
     // running delta: that lets the claim throw the old value away safely.
+    // dispatched_at goes on in the same claim: from here the row is a nudge
+    // awaiting confirmation, and confirmDeliveries owns it until it either
+    // lands (advanceFollowUp) or doesn't (requeueNudge). Status stays 'sent'
+    // throughout, so the reminder keeps listing as awaiting confirmation.
     const { data: nudges, error: nudgeErr } = await supabase
       .from("reminders")
-      .update({ next_follow_up_at: null })
+      .update({ next_follow_up_at: null, dispatched_at: new Date().toISOString() })
       .eq("status", "sent")
       .is("recurrence", null)
+      .is("dispatched_at", null)
       .lte("next_follow_up_at", new Date().toISOString())
       .select("*");
     if (nudgeErr) {
@@ -354,22 +429,20 @@ export default defineSchedule({
             auth: appAuth,
           });
         }
-        // Advance along the curve, or lapse: out of nudges, but the reminder
-        // stays on the books — 'lapsed' means stop asking, not stop tracking.
-        const next = reminder.sent_at ? nextFollowUpAt(reminder.sent_at, attempt) : null;
+        // The curve does NOT move here. Handing a nudge to the session is not
+        // asking him anything — confirmDeliveries advances the count only once
+        // a message is seen leaving. Only the attempt counter moves, and it
+        // drives the retry backoff if this one turns out to have gone nowhere.
         await supabase
           .from("reminders")
-          .update({
-            follow_up_count: attempt,
-            next_follow_up_at: next,
-            ...(next ? {} : { status: "lapsed" }),
-          })
+          .update({ delivery_attempts: reminder.delivery_attempts + 1 })
           .eq("id", reminder.id);
         console.log(
-          `[reminder-poll] follow-up ${attempt}/${MAX_FOLLOW_UPS} sent for ${reminder.id}` +
-            (next ? "" : " (lapsed — no further outreach)"),
+          `[reminder-poll] follow-up ${attempt}/${MAX_FOLLOW_UPS} dispatched for ${reminder.id}`,
         );
       } catch (err) {
+        // The dispatch itself threw, so nothing is in flight: give the deadline
+        // straight back rather than leaving it to the grace window.
         console.error(`[reminder-poll] follow-up dispatch failed for ${reminder.id}`, err);
         await supabase
           .from("reminders")
@@ -377,6 +450,7 @@ export default defineSchedule({
             next_follow_up_at: reminder.sent_at
               ? nextFollowUpAt(reminder.sent_at, reminder.follow_up_count)
               : null,
+            dispatched_at: null,
           })
           .eq("id", reminder.id);
       }
