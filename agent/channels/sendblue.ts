@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { startAuthorization } from "@vercel/connect";
 import { defineChannel, GET, POST } from "eve/channels";
 import type { SessionAuthContext } from "eve/context";
+import { isRunningStaleCode, recordPinnedDeployment } from "#lib/deployment.js";
 import { gmailConnectorUid, OWNER_SUBJECT, ownerEmailAddress } from "#lib/gmail.js";
 import { toImessageText } from "#lib/imessage-format.js";
 import { ownerTimeContext } from "#lib/reminders.js";
@@ -94,6 +95,27 @@ async function clearPendingRequests(phone: string): Promise<void> {
 const MAX_WINDOW_AGE_MS = 30 * 24 * 3600 * 1000;
 const IDLE_BEFORE_ROTATE_MS = 2 * 3600 * 1000;
 
+/**
+ * A session running STALE CHANNEL CODE rotates far sooner than one merely old.
+ *
+ * A durable run pins to the deployment that created it, and its event handlers
+ * never move — so deploying a channel fix cannot reach a session already
+ * running. On 2026-08-22 that meant an `input.requested` handler shipped three
+ * weeks earlier was absent from the only code that could have rendered a
+ * session-limit approval, and Lucy went silent with no error anywhere.
+ *
+ * Rotation is the only thing that adopts new channel code, so drift becomes a
+ * rotation trigger. Three days rather than thirty because the exposure is
+ * asymmetric: a stale session is one unrendered event away from going quiet,
+ * while losing three days of verbatim transcript costs almost nothing — durable
+ * facts live in Supabase, not in the conversation.
+ *
+ * This is deliberately NOT an alert. Drift is permanent from the moment of any
+ * deploy until the session rotates, so a warning would fire after every deploy
+ * and be trained away within a week.
+ */
+const MAX_STALE_CODE_AGE_MS = 3 * 24 * 3600 * 1000;
+
 type SessionWindow = { epoch: number; startedAt: string; lastActivityAt: string };
 
 const sessionKey = (phone: string) => `sendblue:session:${phone}`;
@@ -147,11 +169,34 @@ export async function sessionToken(phone: string, opts?: { rotate?: boolean }): 
 
     const age = now - Date.parse(window.startedAt);
     const idle = now - Date.parse(window.lastActivityAt);
-    if (age >= MAX_WINDOW_AGE_MS && idle >= IDLE_BEFORE_ROTATE_MS && !(await hasPendingRequests(phone))) {
+
+    // Stale channel code shortens the window; everything else about rotation is
+    // unchanged, including the two guards that make it safe — never mid-
+    // conversation, and never while an approval is outstanding (rotating there
+    // would strand a HITL request that could then never be answered).
+    const stale = await isRunningStaleCode(phone);
+    const maxAge = stale ? MAX_STALE_CODE_AGE_MS : MAX_WINDOW_AGE_MS;
+
+    if (age >= maxAge && idle >= IDLE_BEFORE_ROTATE_MS && !(await hasPendingRequests(phone))) {
       const epoch = window.epoch + 1;
       await writeWindow(phone, { epoch, startedAt: nowIso, lastActivityAt: nowIso });
-      console.log(`[sendblue] rotated conversation window → epoch ${epoch}`);
+      console.log(
+        `[sendblue] rotated conversation window → epoch ${epoch}` +
+          (stale ? " (was running stale channel code)" : ""),
+      );
       return tokenFor(phone, epoch);
+    }
+
+    // Old AND stale AND still can't rotate: the conversation is live, or an
+    // approval is pending. Worth saying out loud — this is the exact state the
+    // 2026-08-22 outage sat in, and it is the only one where a session can be
+    // silently unable to render what eve asks of it.
+    if (stale && age >= MAX_STALE_CODE_AGE_MS) {
+      console.error(
+        `[sendblue] session for ${phone} is running stale channel code and could not ` +
+          "rotate (still active, or an approval is pending). It cannot adopt channel " +
+          "fixes until it does.",
+      );
     }
 
     await writeWindow(phone, { ...window, lastActivityAt: nowIso });
@@ -402,6 +447,11 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
     // tool-heavy turn would otherwise look idle).
     async "turn.started"(_data, channel) {
       await sendTypingIndicator(channel.state.phone).catch(() => {});
+      // Events fire INSIDE the durable run, so this is the one place that can
+      // observe which deployment the session is actually pinned to. Called from
+      // a schedule or route it would report current production and drift would
+      // be permanently invisible. Best-effort: never cost a turn.
+      await recordPinnedDeployment(channel.state.phone).catch(() => {});
     },
     async "actions.requested"(_data, channel) {
       await sendTypingIndicator(channel.state.phone).catch(() => {});
