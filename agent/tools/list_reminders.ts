@@ -13,12 +13,15 @@ export default defineTool({
     filter: z.enum(["upcoming", "awaiting_confirmation", "all"]).optional(),
   }),
   async execute({ filter }) {
+    // 'awaiting_delivery' reads as upcoming, never as awaiting_confirmation:
+    // the owner has not been told yet, so asking him to confirm it would be
+    // asking about a message he never received.
     const statuses =
       filter === "awaiting_confirmation"
         ? ["sent", "lapsed"]
         : filter === "all"
-          ? ["pending", "sent", "lapsed"]
-          : ["pending"];
+          ? ["pending", "awaiting_delivery", "sent", "lapsed"]
+          : ["pending", "awaiting_delivery"];
     const { data, error } = await supabase
       .from("reminders")
       .select("id, body, fire_at, recurrence, channel, status, sent_at")

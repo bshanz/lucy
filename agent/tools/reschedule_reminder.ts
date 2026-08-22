@@ -34,7 +34,7 @@ export default defineTool({
         sent_at: null,
       })
       .eq("id", id)
-      .in("status", ["pending", "sent", "sending", "lapsed"])
+      .in("status", ["pending", "awaiting_delivery", "sent", "sending", "lapsed"])
       .select("id, body, fire_at")
       .maybeSingle();
     if (error) return { ok: false as const, error: error.message };

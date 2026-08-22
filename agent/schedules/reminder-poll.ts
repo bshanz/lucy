@@ -1,6 +1,7 @@
 import { defineSchedule } from "eve/schedules";
 import sendblue from "#channels/sendblue.js";
 import slack from "#channels/slack.js";
+import { fetchRecentOutbound, type SendblueMessage } from "#lib/sendblue.js";
 import {
   MAX_FOLLOW_UPS,
   nextFollowUpAt,
@@ -19,6 +20,185 @@ import {
  * tick retries — interrupted schedule steps re-run, so the claim is what
  * prevents double sends.
  */
+
+/**
+ * How long a healthy reminder turn may take to put a text on the wire before
+ * the dispatch is called lost. The repaired session managed it in 7 seconds;
+ * two minutes leaves room for a cold start plus a tool call, and is short
+ * enough that a wedged session is caught within a couple of ticks.
+ */
+const DELIVERY_GRACE_MS = 120_000;
+
+/**
+ * Minutes to wait before re-dispatching a one-off whose last attempt was never
+ * seen to land, indexed by attempts already made.
+ *
+ * Retry is unbounded, with the INTERVAL capped rather than the count. The
+ * failure this defends against — a session parked on a prompt nobody was shown
+ * — is repaired out of band, and a reminder that had quietly given up before
+ * then would reproduce the exact disappearance this mechanism exists to
+ * prevent. So it keeps trying, slowly, and complains every time; the backoff is
+ * only there to stop a dead session being hammered once a minute.
+ */
+const RETRY_BACKOFF_MIN = [1, 5, 15, 60];
+const backoffMinutes = (attempts: number): number =>
+  RETRY_BACKOFF_MIN[Math.min(attempts, RETRY_BACKOFF_MIN.length - 1)];
+
+/**
+ * A recurring reminder gets one cheap retry and then rolls forward.
+ *
+ * It cannot use the backoff above: that works by pushing fire_at, and fire_at
+ * is a recurring reminder's ANCHOR — nextOccurrence steps the wall clock from
+ * it, so shifting it by 15 minutes moves the 6:45am reminder to 7:00am for
+ * good. One retry costs nothing (the row is already due, so the next tick picks
+ * it up with fire_at untouched) and covers a transient stall; past that,
+ * skipping today's instance is strictly better than permanently corrupting the
+ * series, and a daily reminder comes back around tomorrow anyway.
+ */
+const MAX_RECURRING_ATTEMPTS = 2;
+
+/**
+ * Promote dispatches that were seen to land; re-queue the ones that were not.
+ *
+ * The check is deliberately COARSE: it asks whether any message left for this
+ * target after the dispatch, not whether this particular reminder's words did.
+ * Per-reminder correlation isn't available — the model composes the text freely,
+ * so there is no id to match on — and buying it would mean sending reminders
+ * around the model rather than through it, which is the whole reason they read
+ * like a person wrote them.
+ *
+ * Coarse is still right, because it is aimed precisely at the failure that
+ * actually occurs: a session that has stopped speaking delivers NOTHING, so
+ * "nothing left the building" is exactly the signal. What it cannot catch is a
+ * live session that answered some other message in the window while silently
+ * dropping this reminder. That is far narrower and far rarer than the failure
+ * it replaces, and — unlike that one — it cannot be silent: the reminder still
+ * lands on the follow-up curve, so the owner is asked about it within the day.
+ */
+async function confirmDeliveries(): Promise<void> {
+  const { data, error } = await supabase
+    .from("reminders")
+    .select("*")
+    .eq("status", "awaiting_delivery");
+  if (error) {
+    console.error(`[reminder-poll] delivery lookup failed: ${error.message}`);
+    return;
+  }
+  const waiting = (data ?? []) as ReminderRow[];
+  if (waiting.length === 0) return;
+
+  let outbound: SendblueMessage[];
+  try {
+    // One fetch answers every waiting reminder.
+    outbound = await fetchRecentOutbound(100);
+  } catch (err) {
+    // Can't tell delivered from lost. Leave every row exactly as it is and
+    // re-check next tick — guessing in either direction writes a lie into the
+    // reminder's history, which is the failure mode being fixed.
+    console.error("[reminder-poll] outbound fetch failed; deferring confirmation", err);
+    return;
+  }
+
+  for (const reminder of waiting) {
+    const dispatchedAt = reminder.dispatched_at ? Date.parse(reminder.dispatched_at) : 0;
+
+    // Slack has no outbound lookup wired here, so Slack reminders keep the old
+    // optimistic contract: dispatched counts as delivered. Stated out loud
+    // rather than silently assumed — this is the seam to close if Slack ever
+    // becomes a primary surface.
+    if (reminder.channel !== "imessage" || !reminder.phone) {
+      await markDelivered(reminder, reminder.dispatched_at ?? new Date().toISOString());
+      continue;
+    }
+
+    const landed = outbound.find(
+      (m) =>
+        m.to_number === reminder.phone &&
+        m.status !== "ERROR" &&
+        Date.parse(m.date_sent) > dispatchedAt,
+    );
+    if (landed) {
+      await markDelivered(reminder, landed.date_sent);
+      continue;
+    }
+    // Still inside the grace window: the turn may simply not be finished.
+    if (Date.now() - dispatchedAt < DELIVERY_GRACE_MS) continue;
+    await requeue(reminder);
+  }
+}
+
+/**
+ * A dispatch was seen to land. A recurring reminder rolls forward to its next
+ * occurrence; a one-off becomes 'sent' and picks up the follow-up curve — and
+ * the curve now hangs off the OBSERVED delivery time rather than the dispatch,
+ * so a nudge is always measured from the moment he could first have seen it.
+ */
+async function markDelivered(reminder: ReminderRow, deliveredAt: string): Promise<void> {
+  const patch = reminder.recurrence
+    ? {
+        status: "pending",
+        fire_at: nextOccurrence(reminder.fire_at, reminder.recurrence),
+        sent_at: deliveredAt,
+      }
+    : {
+        status: "sent",
+        sent_at: deliveredAt,
+        follow_up_count: 0,
+        next_follow_up_at: nextFollowUpAt(deliveredAt, 0),
+      };
+  await supabase
+    .from("reminders")
+    .update({ ...patch, delivery_attempts: 0, dispatched_at: null })
+    .eq("id", reminder.id);
+}
+
+/**
+ * Nothing left for the owner inside the grace window, so the dispatch was
+ * swallowed — in practice, by a session parked on an input request nobody was
+ * shown. Put the reminder back in the queue and say so at error level: this is
+ * the single place the whole failure becomes visible, and it is meant to be
+ * noisy enough to notice.
+ */
+async function requeue(reminder: ReminderRow): Promise<void> {
+  const attempts = reminder.delivery_attempts;
+  const recurring = reminder.recurrence !== null;
+  const giveUp = recurring && attempts >= MAX_RECURRING_ATTEMPTS;
+
+  console.error(
+    `[reminder-poll] reminder ${reminder.id} was dispatched but nothing reached ` +
+      `${reminder.phone} within ${DELIVERY_GRACE_MS / 1000}s (attempt ${attempts}). ` +
+      "The agent session is probably parked and silently queueing messages. " +
+      (giveUp
+        ? "Recurring — skipping this occurrence to keep the schedule anchored."
+        : `Retrying in ${recurring ? 0 : backoffMinutes(attempts)}m.`),
+  );
+
+  if (giveUp) {
+    await supabase
+      .from("reminders")
+      .update({
+        status: "pending",
+        fire_at: nextOccurrence(reminder.fire_at, reminder.recurrence!),
+        dispatched_at: null,
+        delivery_attempts: 0,
+      })
+      .eq("id", reminder.id);
+    return;
+  }
+
+  await supabase
+    .from("reminders")
+    .update({
+      status: "pending",
+      // Recurring rows keep fire_at untouched (it is the series anchor, and the
+      // row is already due, so the next tick retries immediately).
+      ...(recurring
+        ? {}
+        : { fire_at: new Date(Date.now() + backoffMinutes(attempts) * 60_000).toISOString() }),
+      dispatched_at: null,
+    })
+    .eq("id", reminder.id);
+}
 
 /** Rough elapsed time in the register a person would use out loud. */
 function describeElapsed(ms: number): string {
@@ -68,6 +248,11 @@ export default defineSchedule({
       return;
     }
 
+    // Settle last tick's dispatches first, so a reminder that landed is
+    // promoted before anything else runs and a swallowed one is back in the
+    // queue in time for the claim below to pick it up.
+    await confirmDeliveries();
+
     const { data, error } = await supabase
       .from("reminders")
       .update({ status: "sending" })
@@ -106,27 +291,19 @@ export default defineSchedule({
           continue;
         }
 
-        if (reminder.recurrence) {
-          await supabase
-            .from("reminders")
-            .update({
-              status: "pending",
-              fire_at: nextOccurrence(reminder.fire_at, reminder.recurrence),
-              sent_at: new Date().toISOString(),
-            })
-            .eq("id", reminder.id);
-        } else {
-          const sentAt = new Date().toISOString();
-          await supabase
-            .from("reminders")
-            .update({
-              status: "sent",
-              sent_at: sentAt,
-              follow_up_count: 0,
-              next_follow_up_at: nextFollowUpAt(sentAt, 0),
-            })
-            .eq("id", reminder.id);
-        }
+        // Dispatched, NOT delivered — and the difference is the whole point.
+        // receive() resolves the moment the session accepts the message; the
+        // text is composed and sent seconds later, or never at all if the
+        // session is parked. confirmDeliveries() decides which happened, on a
+        // later tick, from Sendblue's own record of what left.
+        await supabase
+          .from("reminders")
+          .update({
+            status: "awaiting_delivery",
+            dispatched_at: new Date().toISOString(),
+            delivery_attempts: reminder.delivery_attempts + 1,
+          })
+          .eq("id", reminder.id);
       } catch (err) {
         console.error(`[reminder-poll] dispatch failed for ${reminder.id}`, err);
         await supabase.from("reminders").update({ status: "pending" }).eq("id", reminder.id);

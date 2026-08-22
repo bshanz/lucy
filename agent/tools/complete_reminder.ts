@@ -15,7 +15,7 @@ export default defineTool({
       .from("reminders")
       .update({ status: "done", next_follow_up_at: null })
       .eq("id", id)
-      .in("status", ["sent", "sending", "lapsed"])
+      .in("status", ["awaiting_delivery", "sent", "sending", "lapsed"])
       .select("id, body")
       .maybeSingle();
     if (error) return { ok: false as const, error: error.message };

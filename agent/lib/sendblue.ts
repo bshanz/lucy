@@ -132,6 +132,39 @@ export async function fetchRecentInbound(limit = 25): Promise<SendblueMessage[]>
 }
 
 /**
+ * Recent OUTBOUND messages, newest first — Sendblue's own record of what
+ * actually left for a number.
+ *
+ * This is the only trustworthy delivery signal a schedule has. eve's receive()
+ * resolves when the session ACCEPTS a message, seconds before any text is
+ * composed — and a parked session accepts messages it will never speak. Asking
+ * Sendblue what it sent is the one question a wedged session cannot answer
+ * falsely, which is what makes it worth a second API call per tick.
+ *
+ * Outbound payloads put the owner in `to_number` (`from_number` is the Sendblue
+ * line) and carry a `status` that is "ERROR" on a failed send — verified
+ * against a live response rather than the docs.
+ */
+export async function fetchRecentOutbound(limit = 25): Promise<SendblueMessage[]> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    order_by: "createdAt",
+    order_direction: "desc",
+    is_outbound: "true",
+  });
+  const res = await fetch(`${API_BASE}/api/v2/messages?${params}`, {
+    method: "GET",
+    headers: headers(),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`Sendblue outbound fetch failed (${res.status}): ${detail.slice(0, 300)}`);
+  }
+  const json = (await res.json()) as { data?: SendblueMessage[] };
+  return json.data ?? [];
+}
+
+/**
  * Stable dedupe key for a message. Sendblue's canonical id is message_handle
  * (webhook payloads use it); fall back to other id fields, then to a
  * content-derived key so a missing id can never flood the session.

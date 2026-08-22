@@ -18,7 +18,7 @@ export default defineTool({
       .eq("id", id)
       // Not 'sending': that status is the poll's in-flight claim, and it will
       // write its own result over anything set underneath it.
-      .in("status", ["pending", "sent", "lapsed"])
+      .in("status", ["pending", "awaiting_delivery", "sent", "lapsed"])
       .select("id, body")
       .maybeSingle();
     if (error) return { ok: false as const, error: error.message };

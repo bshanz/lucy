@@ -10,12 +10,27 @@ export interface ReminderRow {
   body: string;
   fire_at: string;
   recurrence: string | null; // daily | weekly | weekdays | monthly | every_N_days
+  // 'awaiting_delivery' = handed to the agent, not yet seen leaving for the
+  //   owner. reminder-poll's confirmation pass promotes or re-queues it.
   // 'lapsed' = fired, never confirmed, out of nudges. Still on the books.
-  status: "pending" | "sending" | "sent" | "done" | "cancelled" | "lapsed";
+  status:
+    | "pending"
+    | "sending"
+    | "awaiting_delivery"
+    | "sent"
+    | "done"
+    | "cancelled"
+    | "lapsed";
   follow_up_count: number;
   next_follow_up_at: string | null;
   created_at: string;
+  /** When a message was OBSERVED leaving for the owner. The follow-up curve
+   *  hangs off this, so it must never be stamped from a dispatch alone. */
   sent_at: string | null;
+  /** When the dispatch now awaiting confirmation was handed to the agent. */
+  dispatched_at: string | null;
+  /** Consecutive dispatches never seen to land; resets on confirmation. */
+  delivery_attempts: number;
 }
 
 const EVERY_N_DAYS = /^every_(\d{1,3})_days$/;
