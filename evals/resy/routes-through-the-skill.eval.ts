@@ -31,9 +31,12 @@ export default defineEval({
       asOwnerMessage("can you get me into Carbone sometime next month? party of 2"),
     );
 
-    t.succeeded();
-
-    // The point of the eval: the procedure has to be pulled in.
+    // NOT t.succeeded(). A dateless request should end in a question, and eve
+    // lets that question come back either as prose or as a structured input
+    // request — which parks the run. Both are correct; observed both across
+    // consecutive runs of this exact prompt. Gating on one of the two shapes
+    // fails right behaviour about half the time, so the gates below are the
+    // ones that must hold either way, and everything conversational is soft.
     t.loadedSkill("resy");
 
     // Nothing may be created off a request with no date on it. Gates, because
@@ -55,6 +58,6 @@ export default defineEval({
         "than claiming a table is booked or that a reservation has been set up? Answer NO if " +
         "it states or implies anything has been reserved, held, or armed.",
       { on: turn.message ?? "" },
-    ).atLeast(0.5);
+    ).atLeast(0.5).soft();
   },
 });
