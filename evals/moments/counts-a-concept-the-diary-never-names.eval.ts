@@ -55,7 +55,7 @@ export default defineEval({
       // this lives, so loading it is the intended route. But the eval is about
       // the answer, and reaching a correct one without the skill is a pass —
       // gating here would fail a right answer for taking a different path.
-      t.calledTool("load_skill").soft();
+      t.loadedSkill("diary-recall").soft();
 
       // The gate. Phrased against the reply rather than the tool call because
       // the bug was never in the query — it was in what got said afterwards.
