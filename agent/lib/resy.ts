@@ -937,6 +937,13 @@ export type ResySnipeRow = {
   venue_slug: string | null;
   reservation_date: string;
   party_size: number;
+  /**
+   * A SMALLER party to accept when nothing bookable exists at `party_size`.
+   * Lives on this row rather than in a second snipe on purpose: two rows race
+   * the same drop independently and can both win, which is two tables and two
+   * cancellation fees for one night. Null means the size is not negotiable.
+   */
+  fallback_party_size: number | null;
   earliest_time: string;
   latest_time: string;
   preferred_time: string | null;
@@ -960,10 +967,28 @@ export type ResySnipeRow = {
   reservation_id: string | null;
   booked_time: string | null;
   booked_slot_type: string | null;
+  /** Which size actually got booked — `party_size`, or the fallback. */
+  booked_party_size: number | null;
   deposit_paid_cents: number | null;
   attempts: number;
   last_error: string | null;
 };
+
+/**
+ * The party sizes one snipe may book, in the order he wants them.
+ *
+ * Exported so the race, the watch, and `scripts/check-resy-fallback.ts` all get
+ * the ordering from one place: "primary first" is the whole authorization here,
+ * and a version of it that drifted would quietly book the smaller table while a
+ * bigger one sat available.
+ */
+export function authorizedPartySizes(
+  snipe: Pick<ResySnipeRow, "party_size" | "fallback_party_size">,
+): number[] {
+  return snipe.fallback_party_size && snipe.fallback_party_size < snipe.party_size
+    ? [snipe.party_size, snipe.fallback_party_size]
+    : [snipe.party_size];
+}
 
 /** "19:45:00" (Postgres `time`) → "19:45". Safe on already-short values. */
 export function hhmm(t: string): string {

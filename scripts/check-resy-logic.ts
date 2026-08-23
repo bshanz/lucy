@@ -16,6 +16,7 @@
  * error — it just loses, quietly, and the fall-back DST day is exactly when.
  */
 import {
+  authorizedPartySizes,
   chargeCentsFrom,
   computeDropAt,
   depositWithinBounds,
@@ -289,6 +290,16 @@ if (beforeFallBack && afterFallBack) {
   failures++;
   console.log("FAIL  DST fall-back day did not resolve");
 }
+
+// The party-size fallback. Order is the authorization: he said four, and would
+// take two rather than nothing. Asking for two first would book the small table
+// while a four-top sat available, which is a table he'd have to cancel.
+check("no fallback → just his size", authorizedPartySizes({ party_size: 4, fallback_party_size: null }), [4]);
+check("fallback comes second", authorizedPartySizes({ party_size: 4, fallback_party_size: 2 }), [4, 2]);
+// The DB constraint rejects these, but a row written before it existed, or by
+// hand, must not turn into a booking for MORE people than he authorized.
+check("a bigger 'fallback' is ignored", authorizedPartySizes({ party_size: 2, fallback_party_size: 6 }), [2]);
+check("an equal 'fallback' is ignored", authorizedPartySizes({ party_size: 2, fallback_party_size: 2 }), [2]);
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

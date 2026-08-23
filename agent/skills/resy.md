@@ -59,6 +59,13 @@ anything.
   ceiling. `search_resy` tells you, and `snipe_resy` will refuse. When that
   happens **say so plainly and offer to watch it manually instead** — never
   leave him believing a table is handled when it isn't.
+- **A smaller table can be a fallback, but only if he says so.** "Four of us,
+  but two is better than nothing" is one snipe with `fallbackPartySize`, not
+  two snipes. Two snipes race the same drop independently and can both win —
+  two tables, two cancellation fees, on a night he wanted one table. The larger
+  party is always tried first, and if it falls back you say so in the same
+  breath as the good news: he is about to invite people to a table that seats
+  fewer of them.
 - Capped at 8 armed snipes. If it's full, show the list, ask which to drop,
   cancel it, then retry.
 - When a snipe fires you'll be handed the result, win or lose. **Deliver both.**

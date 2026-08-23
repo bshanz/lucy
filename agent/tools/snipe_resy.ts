@@ -29,12 +29,28 @@ export default defineTool({
     "If you KNOW the exact release time, give dropAtLocal (or daysAhead + dropTimeLocal). " +
     "IF YOU DON'T KNOW IT, don't guess and don't ask him to guess either — give a watch window " +
     "(watchFromLocal + watchUntilLocal) covering the likely hours, and Lucy books the moment " +
-    "tables appear. A guessed minute doesn't error, it just loses.",
+    "tables appear. A guessed minute doesn't error, it just loses. " +
+    "If he'd take a smaller table over no table, set fallbackPartySize — one snipe, one " +
+    "booking, larger party tried first. Never arm a second snipe for the smaller size: both " +
+    "can win the same drop and that's two tables and two cancellation fees.",
   inputSchema: z.object({
     venueId: z.number().int().positive().describe("From search_resy"),
     venueName: z.string().min(1).describe("Exactly as search_resy returned it"),
     reservationDate: z.string().describe("The night he wants to eat, YYYY-MM-DD"),
     partySize: z.number().int().min(1).max(20),
+    fallbackPartySize: z
+      .number()
+      .int()
+      .min(1)
+      .max(19)
+      .optional()
+      .describe(
+        "A SMALLER party to accept when nothing opens at partySize — 'four of us, but book " +
+          "two rather than nothing' → partySize 4, fallbackPartySize 2. One booking either " +
+          "way; the larger party is always tried first. Only set it when he has actually said " +
+          "a smaller table would do, because it books a table that seats fewer people than he " +
+          "asked for.",
+      ),
     earliestTime: z.string().describe("Earliest acceptable seating, 24h HH:MM (e.g. '19:00')"),
     latestTime: z.string().describe("Latest acceptable seating, 24h HH:MM (e.g. '21:00')"),
     preferredTime: z
@@ -99,6 +115,14 @@ export default defineTool({
       if (value && !TIME.test(value)) {
         return { ok: false as const, error: `${label} must be 24-hour HH:MM, got "${value}".` };
       }
+    }
+    if (input.fallbackPartySize != null && input.fallbackPartySize >= input.partySize) {
+      return {
+        ok: false as const,
+        error:
+          `fallbackPartySize (${input.fallbackPartySize}) has to be SMALLER than partySize ` +
+          `(${input.partySize}) — it's what to settle for, not another size to try.`,
+      };
     }
     if (input.earliestTime > input.latestTime) {
       return {
@@ -266,6 +290,7 @@ export default defineTool({
         venue_slug: venue.slug,
         reservation_date: input.reservationDate,
         party_size: input.partySize,
+        fallback_party_size: input.fallbackPartySize ?? null,
         earliest_time: input.earliestTime,
         latest_time: input.latestTime,
         preferred_time: input.preferredTime ?? null,
@@ -297,6 +322,9 @@ export default defineTool({
       venue: venue.name,
       date: input.reservationDate,
       partySize: input.partySize,
+      // Echoed because it changes what he is authorising: a table for fewer
+      // people than he asked for is still a real booking with a real fee.
+      fallbackPartySize: input.fallbackPartySize ?? null,
       window: `${formatTime(input.earliestTime)}–${formatTime(input.latestTime)}`,
       preferred: input.preferredTime ? formatTime(input.preferredTime) : null,
       tablePreference: input.slotTypes?.length ? input.slotTypes : "any",

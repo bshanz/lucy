@@ -9,6 +9,7 @@ import {
   PREWARM_LEAD_MS,
   RACE_LEAD_MS,
   ResyError,
+  authorizedPartySizes,
   book,
   depositWithinBounds,
   describeSlot,
@@ -72,6 +73,18 @@ const LEASE_STALE_MS = 90_000;
 /** Re-attempts of the SAME slot after a request that never arrived. Bounded, but not zero. */
 const MAX_TRANSPORT_RETRIES = 2;
 /**
+ * How long a fallback table is HELD before it's taken, in find-polls (~1s).
+ *
+ * A drop is normally one inventory flip, but "normally" is doing real work in
+ * that sentence. If the two-tops land a few hundred milliseconds before the
+ * four-tops, booking the first thing we see takes the table he settled for
+ * while the one he actually asked for was about to publish — and he'd never
+ * know, because a fallback win looks exactly like a fallback that was needed.
+ * So the primary keeps being asked for another second before the smaller table
+ * is accepted. Costs ~1s, and only on the fallback path.
+ */
+const FALLBACK_GRACE_POLLS = 4;
+/**
  * A watch longer than this isn't waiting for a drop — it's waiting for a
  * CANCELLATION, and the right cadence is completely different.
  *
@@ -112,6 +125,8 @@ type RaceOutcome =
   | {
       kind: "booked";
       slot: ResySlot;
+      /** The size this table was booked for — the fallback when the primary had nothing. */
+      partySize: number;
       resyToken: string;
       reservationId: string | null;
       depositCents: number;
@@ -140,33 +155,73 @@ async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
     slotTypes: snipe.slot_types,
   };
 
+  // The party sizes he authorized, in the order he wants them. Both are asked
+  // inside the SAME poll rather than one after the other, because a drop that
+  // publishes no table for the larger party publishes the smaller ones at that
+  // same instant — giving up on the primary first would spend the race.
+  const sizes = authorizedPartySizes(snipe);
+  const primarySize = sizes[0];
+  const sizeLabel = sizes.length > 1 ? `${sizes[0]} or ${sizes[1]}` : `${sizes[0]}`;
+
   let ranked: ResySlot[] = [];
+  let partySize = snipe.party_size;
   let polls = 0;
   let sawSlotsOutsideWindow = false;
+  // A fallback table found while the primary is still empty is held, not taken.
+  // Refreshed every poll so it can't go stale, and released after the grace.
+  let held: ResySlot[] = [];
+  let heldSize = 0;
+  let graceLeft = FALLBACK_GRACE_POLLS;
 
-  for (; polls < MAX_FIND_POLLS; polls++) {
-    let slots: ResySlot[];
-    try {
-      slots = await findSlots({
-        venueId: snipe.venue_id,
-        day: snipe.reservation_date,
-        partySize: snipe.party_size,
-        fast: true,
-      });
-    } catch (err) {
-      // Transport hiccups are expected under load — keep polling. An auth
-      // failure is not survivable, though, and burning 40 attempts on it just
-      // delays telling the owner the truth.
-      if (err instanceof ResyError && (err.kind === "auth" || err.kind === "not_configured")) {
-        return { kind: "failed", reason: err.message, attempts: polls };
+  poll: for (; polls < MAX_FIND_POLLS; polls++) {
+    let sawInventory = false;
+    let fallbackRanked: ResySlot[] | null = null; // null = no answer for it this poll
+
+    for (const size of sizes) {
+      let slots: ResySlot[];
+      try {
+        slots = await findSlots({
+          venueId: snipe.venue_id,
+          day: snipe.reservation_date,
+          partySize: size,
+          fast: true,
+        });
+      } catch (err) {
+        // Transport hiccups are expected under load — keep polling. An auth
+        // failure is not survivable, though, and burning 40 attempts on it just
+        // delays telling the owner the truth.
+        if (err instanceof ResyError && (err.kind === "auth" || err.kind === "not_configured")) {
+          return { kind: "failed", reason: err.message, attempts: polls };
+        }
+        continue; // this size hiccuped; the other one may still answer
       }
-      await sleep(FIND_POLL_INTERVAL_MS);
-      continue;
+
+      if (slots.length > 0) sawInventory = true;
+      const candidates = rankSlots(slots, prefs);
+
+      if (size === primarySize) {
+        // The size he actually asked for. Nothing to weigh — take it.
+        if (candidates.length > 0) {
+          ranked = candidates;
+          partySize = size;
+          break poll;
+        }
+      } else {
+        fallbackRanked = candidates; // an answer, even when it's empty
+      }
     }
 
-    if (slots.length > 0) {
-      ranked = rankSlots(slots, prefs);
-      if (ranked.length > 0) break;
+    if (fallbackRanked !== null) {
+      held = fallbackRanked;
+      heldSize = sizes[1];
+    }
+    if (held.length > 0 && graceLeft-- <= 0) {
+      ranked = held;
+      partySize = heldSize;
+      break;
+    }
+
+    if (sawInventory && held.length === 0) {
       // Inventory exists but none of it is inside the window he authorized.
       // That's a real answer, not a reason to keep hammering: the window is the
       // authorization, and booking outside it is not ours to do.
@@ -180,8 +235,9 @@ async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
     return {
       kind: "missed",
       reason: sawSlotsOutsideWindow
-        ? `tables opened but none between ${formatTime(prefs.earliestTime)} and ${formatTime(prefs.latestTime)}`
-        : "nothing ever opened up",
+        ? `tables opened, but nothing for ${sizeLabel} between ` +
+          `${formatTime(prefs.earliestTime)} and ${formatTime(prefs.latestTime)}`
+        : `nothing ever opened up for ${sizeLabel}`,
       attempts: polls,
     };
   }
@@ -196,7 +252,7 @@ async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
       const details = await slotDetails({
         configToken: slot.configToken,
         day: snipe.reservation_date,
-        partySize: snipe.party_size,
+        partySize,
         fast: true,
       });
 
@@ -221,6 +277,7 @@ async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
       return {
         kind: "booked",
         slot,
+        partySize,
         resyToken: result.resyToken,
         reservationId: result.reservationId,
         depositCents: details.chargeCents,
@@ -241,6 +298,7 @@ async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
             return {
               kind: "booked",
               slot: { ...slot, time: existing.time ?? slot.time, type: existing.slotType ?? slot.type },
+              partySize,
               resyToken: existing.resyToken,
               reservationId: existing.reservationId,
               depositCents: 0, // unknown from this path; the confirmation carries the real figure
@@ -344,21 +402,30 @@ async function runWatch(
         Date.parse(snipe.watch_until!), // never poll past the owner's window
       );
 
+  // Both authorized sizes are watched, not just the primary. A drop that never
+  // publishes a table for the larger party is exactly the case a fallback exists
+  // for, and watching only the primary would sit through it seeing nothing.
+  const sizes = authorizedPartySizes(snipe);
+
   do {
     let slots: ResySlot[] = [];
-    try {
-      slots = await findSlots({
-        venueId: snipe.venue_id,
-        day: snipe.reservation_date,
-        partySize: snipe.party_size,
-        fast: true,
-      });
-    } catch (err) {
-      if (err instanceof ResyError && (err.kind === "auth" || err.kind === "not_configured")) {
-        await finish(snipe, { kind: "failed", reason: err.message, attempts: 0 }, receive, appAuth);
-        return;
+    for (const size of sizes) {
+      try {
+        slots = await findSlots({
+          venueId: snipe.venue_id,
+          day: snipe.reservation_date,
+          partySize: size,
+          fast: true,
+        });
+      } catch (err) {
+        if (err instanceof ResyError && (err.kind === "auth" || err.kind === "not_configured")) {
+          await finish(snipe, { kind: "failed", reason: err.message, attempts: 0 }, receive, appAuth);
+          return;
+        }
+        // Transport noise mid-drop is expected; keep watching.
+        slots = [];
       }
-      // Transport noise mid-drop is expected; keep watching.
+      if (slots.length > 0) break; // something published — hand it to the race
     }
 
     if (slots.length > 0) {
@@ -413,6 +480,7 @@ async function finish(
         reservation_id: outcome.reservationId,
         booked_time: outcome.slot.time,
         booked_slot_type: outcome.slot.type,
+        booked_party_size: outcome.partySize,
         deposit_paid_cents: outcome.depositCents,
         attempts: 1,
         updated_at: now,
@@ -444,11 +512,26 @@ async function finish(
       `briefly, as something useful you now know about this restaurant.`
     : "";
 
+  // A fallback win is NOT the table he asked for, and a text that reads like one
+  // has him arriving with four people to a two-top. Say the number that was
+  // actually booked, and say it fell back, in the same breath.
+  const fellBack =
+    outcome.kind === "booked" && outcome.partySize !== snipe.party_size
+      ? ` IMPORTANT: no table for ${snipe.party_size} was released, so this is the smaller ` +
+        `party of ${outcome.partySize} he authorised as a fallback. Say that plainly — he needs ` +
+        `to know the table seats ${outcome.partySize}, not ${snipe.party_size} — and don't ` +
+        `present it as the table he originally wanted.`
+      : "";
+
+  const sizeWanted = snipe.fallback_party_size
+    ? `${snipe.party_size} (or ${snipe.fallback_party_size})`
+    : `${snipe.party_size}`;
+
   const prompt =
     outcome.kind === "booked"
       ? `A reservation you were sniping for the owner just came through: ` +
         `${describeSlot(snipe.venue_name, snipe.reservation_date, outcome.slot)}, party of ` +
-        `${snipe.party_size}` +
+        `${outcome.partySize}` +
         (outcome.reservationId ? `, confirmation ${outcome.reservationId}` : "") +
         (outcome.depositCents > 0 ? `, ${formatUsd(outcome.depositCents)} deposit taken` : "") +
         `. Text him the good news in one or two short lines — the restaurant, the day, the time, ` +
@@ -459,9 +542,10 @@ async function finish(
             `known from here. Mention that a card may have been charged and he can see the ` +
             `exact figure in the Resy app — do NOT quote a number.`
           : "") +
+        fellBack +
         measured
       : `A reservation snipe just LOST: ${snipe.venue_name} on ${snipe.reservation_date} for ` +
-        `${snipe.party_size}, wanted between ${formatTime(hhmm(snipe.earliest_time))} and ` +
+        `${sizeWanted}, wanted between ${formatTime(hhmm(snipe.earliest_time))} and ` +
         `${formatTime(hhmm(snipe.latest_time))}. What happened: ${outcome.reason}. Tell him ` +
         `straight away, in one or two lines, without drama and without apologising twice. ` +
         `Offer to try again at the next drop or to look at nearby nights. Do NOT claim anything ` +
@@ -515,7 +599,9 @@ export default defineSchedule({
           appAuth,
           s,
           `A reservation watch just ended without anything opening: ${s.venue_name} on ` +
-            `${s.reservation_date} for ${s.party_size}. Nothing was booked and nothing is ` +
+            `${s.reservation_date} for ${s.party_size}` +
+            (s.fallback_party_size ? ` (or ${s.fallback_party_size})` : "") +
+            `. Nothing was booked and nothing is ` +
             `still watching. Tell him in one short line and offer to try the next release.`,
         );
       } catch (err) {
