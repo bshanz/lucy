@@ -47,6 +47,18 @@ returns `matchedKeyword: false`, a `note`, and **every moment in the window**
 instead. That is not a match list — it is the raw window handed to you because
 your words missed. Read the entries and decide yourself which ones count.
 
+## The one series that IS structured
+
+The nightly healthy-eating check-in writes a fixed body — `Healthy eating: yes`
+or `Healthy eating: no`, category `health` — precisely so it escapes everything
+above. "How many clean days this month?" is a literal query for
+`["Healthy eating: yes"]`, and it is exact.
+
+Two cautions. A day with no entry means he never answered, **not** that he ate
+badly — report the denominator you actually have ("14 of the 19 nights you
+answered"). And any colour he added lives in a separate moment with his own
+wording, so it is subject to the keyword problem like everything else.
+
 ## Counting honestly
 
 Entries are prose, not quantities. `"three Bellinis and an espresso martini"`
