@@ -1,10 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
+import type { UserContent } from "ai";
 import { startAuthorization } from "@vercel/connect";
 import { defineChannel, GET, POST } from "eve/channels";
 import type { SessionAuthContext } from "eve/context";
 import { isRunningStaleCode, recordPinnedDeployment } from "#lib/deployment.js";
 import { gmailConnectorUid, OWNER_SUBJECT, ownerEmailAddress } from "#lib/gmail.js";
 import { toImessageText } from "#lib/imessage-format.js";
+import { buildTurnMessage, hasPayload } from "#lib/inbound-media.js";
 import { ownerTimeContext } from "#lib/reminders.js";
 import { markRead, sendMessage, sendTypingIndicator } from "#lib/sendblue.js";
 import { supabase } from "#lib/supabase.js";
@@ -366,10 +368,14 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
         from_number?: string;
         to_number?: string;
         content?: string;
+        media_url?: string | null;
         is_outbound?: boolean;
         message_handle?: string;
       } | null;
-      if (!body?.from_number || !body.content || body.is_outbound) {
+      // Same payload test as the poller: an uncaptioned image has empty
+      // `content` and a populated `media_url`, and the old `!body.content`
+      // guard silently 200'd it into the void.
+      if (!body?.from_number || body.is_outbound || !hasPayload(body)) {
         return new Response("ignored", { status: 200 });
       }
 
@@ -395,7 +401,6 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       }
 
       const phone = body.from_number;
-      const content = body.content;
       waitUntil(
         (async () => {
           // Claimed above, so the receipt is honest: Lucy has this one.
@@ -406,12 +411,18 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
             continuationToken: await sessionToken(phone),
             state: { phone },
           };
-          const responses = await matchPendingResponses(phone, content).catch(() => []);
+          // Same builder as the poller, so the two ingress paths can never
+          // disagree about what an inbound image turns into.
+          const message = await buildTurnMessage(body);
+          const responses =
+            typeof message === "string"
+              ? await matchPendingResponses(phone, message).catch(() => [])
+              : [];
           if (responses.length > 0) {
             await send({ inputResponses: responses, context }, options);
             await clearPendingRequests(phone).catch(() => {});
           } else {
-            await send({ message: content, context }, options);
+            await send({ message, context }, options);
           }
         })(),
       );
@@ -430,15 +441,20 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       continuationToken: await sessionToken(phone),
       state: { phone },
     };
-    if (typeof input.message === "string") {
-      const responses = await matchPendingResponses(phone, input.message).catch(() => []);
+    // eve types the authored receive hook's input as `message: string`, but the
+    // caller side (CrossChannelReceiveOptions) is `string | UserContent` and the
+    // runtime forwards either verbatim. The poller hands us an array of parts
+    // when the owner texted an image, so widen it here rather than lie about it.
+    const message = input.message as string | UserContent;
+    if (typeof message === "string") {
+      const responses = await matchPendingResponses(phone, message).catch(() => []);
       if (responses.length > 0) {
         const session = await send({ inputResponses: responses, context }, options);
         await clearPendingRequests(phone).catch(() => {});
         return session;
       }
     }
-    return send({ message: input.message, context }, options);
+    return send({ message, context }, options);
   },
 
   events: {

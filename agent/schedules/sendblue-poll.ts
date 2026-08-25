@@ -1,6 +1,7 @@
 import { defineSchedule } from "eve/schedules";
 import type { ScheduleHandlerArgs } from "eve/schedules";
 import sendblue, { sendblueAuth } from "#channels/sendblue.js";
+import { buildTurnMessage, hasPayload } from "#lib/inbound-media.js";
 import { fetchRecentInbound, markRead, messageKey, sendTypingIndicator } from "#lib/sendblue.js";
 import { supabase } from "#lib/supabase.js";
 
@@ -31,10 +32,15 @@ async function pollOnce(receive: ScheduleHandlerArgs["receive"], owner: string):
   const inbound = await fetchRecentInbound(25);
 
   // Only the owner, only recent (poll window safety net), oldest first.
+  //
+  // `hasPayload` rather than a bare content check: an image texted with no
+  // caption arrives with `content: ""` and a populated `media_url`, and a
+  // content-only filter dropped it before it was ever claimed — no dispatch, no
+  // read receipt, no log line. Lucy simply went silent on photos.
   const cutoff = Date.now() - 15 * 60 * 1000;
   const candidates = inbound
     .filter((m) => m.from_number === owner)
-    .filter((m) => m.content && m.content.trim().length > 0)
+    .filter(hasPayload)
     .filter((m) => new Date(m.date_sent).getTime() > cutoff)
     .sort((a, b) => new Date(a.date_sent).getTime() - new Date(b.date_sent).getTime());
 
@@ -66,8 +72,13 @@ async function pollOnce(receive: ScheduleHandlerArgs["receive"], owner: string):
   console.log(`[sendblue-poll] dispatching ${fresh.length} message(s) from ${owner}`);
   for (let i = 0; i < fresh.length; i++) {
     try {
+      // Built AFTER the claim, so a slow attachment download can't hand the same
+      // message to a second poller. buildTurnMessage never throws — an image it
+      // can't fetch or can't read degrades to a note Lucy reads out loud, which
+      // keeps a broken URL from costing the turn instead of just the picture.
+      const message = await buildTurnMessage(fresh[i]);
       await receive(sendblue, {
-        message: fresh[i].content!,
+        message,
         target: { phone: owner },
         auth: sendblueAuth(owner),
       });
