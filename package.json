@@ -17,9 +17,12 @@
     "@vercel/connect": "0.5.0",
     "ai": "^7.0.38",
     "eve": "^0.27.13",
+    "heic-decode": "^2.1.0",
+    "jpeg-js": "^0.4.4",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@types/heic-decode": "^2.0.0",
     "@types/node": "24.x",
     "typescript": "7.0.1-rc"
   },
