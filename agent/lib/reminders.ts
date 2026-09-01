@@ -499,4 +499,73 @@ export async function reanchorRecurring(fromTz: string, toTz: string): Promise<n
   return moved;
 }
 
+/**
+ * How far back to look for one-offs that were probably meant in the NEW zone.
+ * Long enough to cover a flight plus the wait to remember to tell her, short
+ * enough that it can't sweep in things scheduled from home last week.
+ */
+const RECENT_ONE_OFF_HOURS = 12;
+
+export type StrandedOneOff = {
+  id: string;
+  body: string;
+  /** What will actually happen if nothing is done, in his new local terms. */
+  willFireAt: string;
+  /** What he probably meant, in his new local terms. */
+  ifMoved: string;
+  /** Pass straight to reschedule_reminder to make ifMoved true. */
+  moveTo: string;
+};
+
+/**
+ * One-off reminders set in the last few hours, which a timezone switch has
+ * just made suspect.
+ *
+ * reanchorRecurring deliberately leaves one-offs alone: they are usually a
+ * moment agreed with another person, and moving "call mom Thursday 5pm"
+ * because he boarded a plane would be a surprise. But that rule assumes the
+ * reminder was set AT HOME. Anything he set after landing, before thinking to
+ * mention the trip, was typed in the local hour he could see on his phone and
+ * stored in the zone Lucy still believed in — so it is now silently wrong by
+ * the whole offset.
+ *
+ * This REPORTS them rather than moving them, because the two cases are
+ * genuinely indistinguishable from the data: a 5pm Eastern call scheduled from
+ * the airport lounge looks exactly like a 5pm Pacific reminder set on landing.
+ * Only he knows which, so Lucy asks. Returns [] when there is nothing to ask
+ * about, which is the common case.
+ */
+export async function recentOneOffs(fromTz: string, toTz: string): Promise<StrandedOneOff[]> {
+  if (fromTz === toTz) return [];
+
+  const since = new Date(Date.now() - RECENT_ONE_OFF_HOURS * 3_600_000).toISOString();
+  const { data, error } = await supabase
+    .from("reminders")
+    .select("id, body, fire_at")
+    .is("recurrence", null)
+    .eq("status", "pending")
+    .gte("created_at", since)
+    // Something already due is past arguing about.
+    .gt("fire_at", new Date().toISOString())
+    .order("fire_at", { ascending: true });
+  if (error) throw new Error(error.message);
+
+  const out: StrandedOneOff[] = [];
+  for (const row of (data ?? []) as { id: string; body: string; fire_at: string }[]) {
+    // The wall clock he actually typed, read back in the zone it was stored in.
+    const typed = wallClockString(new Date(row.fire_at), fromTz).slice(0, 16);
+    const shifted = wallClockToUtc(typed, toTz);
+    // Moving it would put it in the past, so there is nothing to offer.
+    if (!shifted || shifted.getTime() <= Date.now()) continue;
+    out.push({
+      id: row.id,
+      body: row.body,
+      willFireAt: formatLocal(row.fire_at),
+      ifMoved: formatLocal(shifted.toISOString()),
+      moveTo: typed,
+    });
+  }
+  return out;
+}
+
 export { supabase };

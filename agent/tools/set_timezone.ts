@@ -9,6 +9,7 @@ import {
   ownerTimezone,
   primeOwnerTimezone,
   reanchorRecurring,
+  recentOneOffs,
   wallClockToUtc,
   writeTravelOverride,
 } from "#lib/reminders.js";
@@ -26,7 +27,9 @@ export default defineTool({
     "home zone on its own after that. Pass timezone 'home' to switch back early. Always know the " +
     "return date before calling — ask him how long he's there rather than guessing. Repeating " +
     "reminders move with him (a 7:45pm check-in stays 7:45pm); one-off reminders keep the exact " +
-    "times they were set for. Confirm the returned zone and until date back to him.",
+    "times they were set for. Confirm the returned zone and until date back to him. If " +
+    "`checkTheseOneOffs` comes back non-empty, ask him about those in the SAME reply — see the " +
+    "Travel section of your instructions.",
   inputSchema: z.object({
     timezone: z
       .string()
@@ -52,11 +55,22 @@ export default defineTool({
 
     if (input.timezone.trim().toLowerCase() === "home") {
       if (from === home) {
-        return { ok: true as const, timezone: home, homeTimezone: home, until: null, reanchored: 0, alreadyHome: true };
+        return {
+          ok: true as const,
+          timezone: home, homeTimezone: home, until: null,
+          reanchored: 0, checkTheseOneOffs: [], alreadyHome: true,
+        };
       }
       await clearTravelOverride();
       const reanchored = await reanchorRecurring(from, home);
-      return { ok: true as const, timezone: home, homeTimezone: home, until: null, reanchored, alreadyHome: false };
+      return {
+        ok: true as const,
+        timezone: home, homeTimezone: home, until: null, reanchored,
+        // Symmetric: a reminder set on the last morning of the trip was typed
+        // in trip-local hours and is now wrong in the other direction.
+        checkTheseOneOffs: await recentOneOffs(from, home),
+        alreadyHome: false,
+      };
     }
 
     const tz = input.timezone.trim();
@@ -117,6 +131,10 @@ export default defineTool({
       homeTimezone: home,
       until: formatLocal(until.toISOString()),
       reanchored,
+      // Usually empty. Non-empty means he set one-offs before mentioning the
+      // trip, so their hour was read in the zone he'd left — he has to say
+      // which he meant, because the data cannot.
+      checkTheseOneOffs: await recentOneOffs(from, tz),
       alreadyHome: false,
     };
   },

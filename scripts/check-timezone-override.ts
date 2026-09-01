@@ -89,6 +89,23 @@ const tokyo = reanchor(checkIn, ET, "Asia/Tokyo");
 check("7:45pm in Tokyo", hourIn(tokyo, "Asia/Tokyo"), "19:45");
 check("which is EARLIER in absolute terms", tokyo.getTime() < checkIn.getTime(), true);
 
+// --- 4b. A one-off set IN San Francisco, before the trip was mentioned. This
+// is the case reanchorRecurring deliberately does not handle, so set_timezone
+// reports it instead: the hour he typed was read in the zone he had already
+// left, which makes it early by the whole offset, not late.
+console.log("\n-- a one-off set after landing, before telling her --");
+// He is standing in SF and types "5pm". Lucy still thinks Eastern, so it is
+// stored as 5pm ET.
+const stored = wallClockToUtc("2026-09-02T17:00", ET)!;
+check("he'll be told 5pm", hourIn(stored, ET), "17:00");
+check("but it fires at 2pm where he's standing", hourIn(stored, PT), "14:00");
+check("i.e. THREE HOURS EARLY, not late", (stored.getTime() - wallClockToUtc("2026-09-02T17:00", PT)!.getTime()) / 3_600_000, -3);
+// What set_timezone offers him: the same wall clock, honoured in the new zone.
+const offered = reanchor(stored, ET, PT);
+check("the offered fix reads 5pm in SF", hourIn(offered, PT), "17:00");
+// And the offer must be a bare wall clock reschedule_reminder can consume.
+check("moveTo shape is YYYY-MM-DDTHH:mm", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test("2026-09-02T17:00"), true);
+
 // --- 5. Zone validation. The model will reach for abbreviations; they must be
 // rejected loudly rather than resolving to something plausible and wrong.
 console.log("\n-- zone validation --");
