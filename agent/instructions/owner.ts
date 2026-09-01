@@ -18,7 +18,10 @@ export default defineDynamic({
       const owner = process.env.OWNER_NAME || "the owner";
       const first = owner.split(" ")[0];
       const email = process.env.OWNER_EMAIL || "(not configured)";
-      const tz = process.env.OWNER_TIMEZONE || "America/New_York";
+      // HOME zone only. The zone in force right now can differ (travel mode)
+      // and rides on every message, because this block is captured once at
+      // session.started and would go stale the moment he switches.
+      const home = process.env.OWNER_TIMEZONE || "America/New_York";
 
       // Off unless HEALTH_CHECKIN=1. The reminder itself lives in the database;
       // this is only the half the model needs — how to read the answer and what
@@ -42,7 +45,7 @@ export default defineDynamic({
 
 - Your name is **${agent}**.
 - Your owner is **${owner}** — address them as ${first}.
-- Their email: ${email}. Their timezone: ${tz} — all wall-clock times you pass to tools are in this zone.${checkIn}`,
+- Their email: ${email}. Their **home** timezone is ${home}. While they travel this changes: the time line on every message is the authority on the zone in force, and every wall-clock time you pass to a tool is in *that* zone.${checkIn}`,
       });
     },
   },

@@ -220,6 +220,7 @@ Verify without booking anything:
 ```bash
 npx tsx scripts/check-calendar-logic.ts                      # guest-list logic, no network
 npx tsx scripts/check-resy-logic.ts                          # pure logic, no network
+npx tsx scripts/check-timezone-override.ts                   # travel mode, no network
 npx tsx --env-file=.env.local scripts/check-resy-claim.ts    # no double-booking
 npx tsx --env-file=.env.local scripts/check-resy-live.ts     # live, stops before /3/book
 ```
@@ -290,7 +291,7 @@ agent/
                          #   exact millisecond and races find -> details -> book
     resy-auth.ts         # daily; session liveness + 7/3/1-day expiry warnings
   tools/                 # reminders, memory, diary, gmail (send/reply/schedule),
-                         #   calendar, tasks, flights,
+                         #   calendar, tasks, flights, set_timezone (travel mode),
                          #   resy (search/availability/book/snipe/cancel)
   lib/                   # sendblue/gmail/serpapi/resy clients, tz math, supabase,
                          #   formatting; resy.ts also holds the pure ranking logic,
@@ -300,6 +301,8 @@ scripts/
   connect-resy.ts        # links Resy from the CLI (--send is opt-in; it texts you)
   check-calendar-logic.ts # pure checks: guest-list normalise/merge, duration on a move
   check-resy-logic.ts    # pure checks: slot ranking, deposit cap, DST, unit boundary
+  check-timezone-override.ts # travel mode: the recurring re-anchor, DST, the
+                         #   EST-means-Panama trap, and that every ingress primes
   check-resy-claim.ts    # proves two concurrent crons can't double-book a table
   check-email-claim.ts   # proves two concurrent crons can't double-send a
                          #   scheduled email; sends nothing, .invalid recipients

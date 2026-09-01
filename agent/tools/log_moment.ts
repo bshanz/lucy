@@ -7,14 +7,14 @@ export default defineTool({
   description:
     "Log a moment in the owner's diary — something they did or experienced (ate ice cream, went " +
     "to a concert, worked out, met a friend). Defaults to right now; pass happenedAtLocal " +
-    "(NY wall-clock) when they're describing something from earlier ('yesterday I…'). Log " +
+    "(owner-local wall-clock) when they're describing something from earlier ('yesterday I…'). Log " +
     "quietly and generously whenever they mention doing something.",
   inputSchema: z.object({
     body: z.string().min(1).describe("What happened, in plain words, e.g. 'Ate ice cream downtown with a friend'"),
     happenedAtLocal: z
       .string()
       .optional()
-      .describe("When it happened, NY local YYYY-MM-DDTHH:mm; omit for 'just now'"),
+      .describe("When it happened, owner-local YYYY-MM-DDTHH:mm; omit for 'just now'"),
     category: z
       .string()
       .optional()
@@ -25,7 +25,7 @@ export default defineTool({
     if (happenedAtLocal) {
       happenedAt = ownerWallClockToUtc(happenedAtLocal);
       if (!happenedAt) {
-        return { ok: false as const, error: "happenedAtLocal must be YYYY-MM-DDTHH:mm NY local time" };
+        return { ok: false as const, error: "happenedAtLocal must be YYYY-MM-DDTHH:mm owner-local time" };
       }
     }
 

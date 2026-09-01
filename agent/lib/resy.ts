@@ -1,4 +1,4 @@
-import { ownerWallClockToUtc } from "#lib/reminders.js";
+import { homeTimezone, wallClockToUtc } from "#lib/reminders.js";
 
 /**
  * Resy client + the pure logic behind reservation sniping.
@@ -1071,19 +1071,25 @@ export function formatUsd(cents: number): string {
 }
 
 /**
- * Owner-local wall clock ("2026-08-31T09:00") → the UTC instant to fire at.
+ * Home-local wall clock ("2026-08-31T09:00") → the UTC instant to fire at.
  *
- * Reuses ownerWallClockToUtc from #lib/reminders.js rather than reimplementing
- * offset math — that helper is already tested against DST, including the
- * fall-back day. The repo's rule is that nothing does timezone math twice.
+ * Reuses the converter from #lib/reminders.js rather than reimplementing offset
+ * math — that helper is already tested against DST, including the fall-back
+ * day. The repo's rule is that nothing does timezone math twice.
  *
- * ⚠️ CAVEAT: this resolves in the OWNER's timezone, not the venue's. Right for
- * a New Yorker sniping a New York table; an hour off for booking Miami from
- * California. snipe_resy shows the resolved drop time on the approval card in
- * owner-local terms precisely so a wrong one is visible before it's armed.
+ * ⚠️ PINNED TO THE HOME ZONE, NOT THE CURRENT ONE. A drop time is a property of
+ * the restaurant, so it must not move because the owner got on a plane: with
+ * ownerTimezone() here, travel mode would shift every armed snipe by the
+ * offset mid-trip and miss the table by hours. Home is the right approximation
+ * because the venues are overwhelmingly at home.
+ *
+ * ⚠️ RESIDUAL CAVEAT: this still resolves in the OWNER's home zone, not the
+ * venue's. Right for a New Yorker sniping a New York table; an hour off for
+ * booking Miami from New York. snipe_resy shows the resolved drop time on the
+ * approval card so a wrong one is visible before it's armed.
  */
 export function computeDropAt(wallClockLocal: string): Date | null {
-  return ownerWallClockToUtc(wallClockLocal);
+  return wallClockToUtc(wallClockLocal, homeTimezone());
 }
 
 /**

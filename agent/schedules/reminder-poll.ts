@@ -3,9 +3,12 @@ import sendblue from "#channels/sendblue.js";
 import slack from "#channels/slack.js";
 import { fetchRecentOutbound, type SendblueMessage } from "#lib/sendblue.js";
 import {
+  expireTravelOverrideIfDue,
+  isWakingHour,
   MAX_FOLLOW_UPS,
   nextFollowUpAt,
   nextOccurrence,
+  primeOwnerTimezone,
   supabase,
   type ReminderRow,
 } from "#lib/reminders.js";
@@ -327,6 +330,39 @@ export default defineSchedule({
       console.warn("[reminder-poll] Supabase env not set; skipping");
       return;
     }
+    // Retire a lapsed travel override BEFORE anything reads a clock, so a
+    // reminder due this minute is already evaluated against the home zone.
+    // A silent revert reads as a bug at 7am, so he gets told once.
+    try {
+      const expired = await expireTravelOverrideIfDue();
+      if (expired) {
+        console.log(`[reminder-poll] travel override expired: ${expired.from} -> ${expired.to}`);
+        // The override lapses at 23:59 in the zone he was VISITING, which is
+        // the small hours back home for any westward trip. Correctness can't
+        // wait for morning, but the text can't wake him either — and this repo
+        // already holds that unprompted 3am outreach is worse than silence. So
+        // the revert always happens; only the notice is skipped, and he sees
+        // the effect on the next reminder either way.
+        const phone = process.env.OWNER_PHONE;
+        if (phone && isWakingHour()) {
+          await receive(sendblue, {
+            message:
+              `His trip to ${expired.from} is over, so you have switched back to his home timezone ` +
+              `(${expired.to}); ${expired.reanchored} repeating reminder(s) moved with him. Tell him ` +
+              "in one short line, no questions.",
+            target: { phone },
+            auth: appAuth,
+          });
+        }
+      }
+    } catch (err) {
+      // Never let this block the reminders themselves; the read path ignores a
+      // lapsed override anyway, so the zone is right even when this throws.
+      console.error("[reminder-poll] travel override expiry failed", err);
+    }
+
+    // Load any travel override before any clock is read; see primeOwnerTimezone.
+    await primeOwnerTimezone();
 
     // Settle last tick's dispatches first, so a reminder that landed is
     // promoted before anything else runs and a swallowed one is back in the

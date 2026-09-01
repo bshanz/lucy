@@ -5,17 +5,17 @@ import { formatLocal, ownerTimezone, ownerWallClockToUtc } from "#lib/reminders.
 
 export default defineTool({
   description:
-    "Create an event on the owner's Google Calendar. Times are NY wall-clock (no offsets) — " +
+    "Create an event on the owner's Google Calendar. Times are owner-local wall-clock (no offsets) — " +
     "the tool handles the timezone. Pass `attendees` to invite people: Google emails them a " +
     "real invitation, so that path REQUIRES the owner's approval and he sees the guest list " +
     "first. Confirm the returned localTime back to the owner.",
   inputSchema: z.object({
     title: z.string().min(1),
-    startLocal: z.string().min(1).describe("Start, NY local time YYYY-MM-DDTHH:mm"),
+    startLocal: z.string().min(1).describe("Start, owner-local YYYY-MM-DDTHH:mm"),
     endLocal: z
       .string()
       .optional()
-      .describe("End, NY local time YYYY-MM-DDTHH:mm; defaults to one hour after start"),
+      .describe("End, owner-local YYYY-MM-DDTHH:mm; defaults to one hour after start"),
     description: z.string().optional(),
     location: z.string().optional(),
     attendees: z

@@ -68,8 +68,174 @@ export function parseRecurrence(r: string): string | null {
   return null;
 }
 
-export function ownerTimezone(): string {
+/**
+ * TRAVEL MODE — a temporary timezone override.
+ *
+ * OWNER_TIMEZONE is the owner's HOME zone and never changes at runtime. When he
+ * travels, a row in channel_state overrides it until a return date, after which
+ * it expires on its own (reminder-poll runs the expiry pass, and reads below
+ * ignore a lapsed override anyway so a poll outage can never strand him).
+ *
+ * ownerTimezone() stays SYNCHRONOUS on purpose: it is called inside
+ * Intl.DateTimeFormat construction and inside the fixed-point loop in
+ * ownerWallClockToUtc, and making it async would ripple through every pure
+ * function in this file. So the override is cached in module scope and every
+ * ingress path primes it first. A path that forgets falls back to the home
+ * zone — degraded to today's behaviour, never broken.
+ */
+export type TravelOverride = {
+  /** IANA zone he's currently in. */
+  timezone: string;
+  /** UTC instant the override lapses: 23:59 on his last day away, local to it. */
+  until: string;
+  setAt: string;
+};
+
+const TZ_KEY = "owner_timezone";
+
+/**
+ * How long a primed value is trusted. Long enough that a multi-step turn does
+ * not re-read per tool call, short enough that a warm Fluid Compute instance
+ * cannot serve a stale zone for more than a minute after a switch.
+ */
+const TZ_TTL_MS = 60_000;
+
+let tzCache: { tz: string; ov: TravelOverride | null; at: number } | null = null;
+
+/** The permanent home zone. The thing travel mode always reverts to. */
+export function homeTimezone(): string {
   return process.env.OWNER_TIMEZONE || "America/New_York";
+}
+
+/**
+ * Is this a real IANA Area/Location zone? Dependency-free.
+ *
+ * The slash is load-bearing, and NOT cosmetic. ICU also accepts bare
+ * abbreviations, and two of them are traps that fail silently:
+ *
+ *   "EST" → America/Panama      (no daylight saving)
+ *   "MST" → America/Phoenix     (no daylight saving)
+ *
+ * A model reaching for "EST" to mean Eastern would pin him to a zone that
+ * never springs forward, putting every reminder an hour off for the whole of
+ * summer with nothing to show for it in the logs. Requiring Area/Location
+ * rejects those while accepting every zone anyone actually travels to.
+ */
+export function isValidTimezone(tz: string): boolean {
+  if (!tz.includes("/")) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The zone to interpret every wall clock in. Falls back to home whenever the
+ * cache is cold, which is the conservative direction: an unprimed path behaves
+ * exactly as it did before travel mode existed.
+ */
+export function ownerTimezone(): string {
+  if (tzCache && Date.now() - tzCache.at < TZ_TTL_MS) return tzCache.tz;
+  return homeTimezone();
+}
+
+/**
+ * The override currently in force, read synchronously from the primed cache.
+ * Null when he is home OR when nothing has primed yet — callers must treat it
+ * as "no travel note to show", never as proof he is home.
+ */
+export function activeTravelOverride(): TravelOverride | null {
+  if (tzCache && Date.now() - tzCache.at < TZ_TTL_MS) return tzCache.ov;
+  return null;
+}
+
+/**
+ * The active override, or null if there is none, it has lapsed, or it names a
+ * zone this runtime cannot resolve. Expiry is enforced HERE, on the read path,
+ * so the zone is correct even if the expiry pass in reminder-poll never runs.
+ */
+export async function readTravelOverride(): Promise<TravelOverride | null> {
+  const { data, error } = await supabase
+    .from("channel_state")
+    .select("value")
+    .eq("key", TZ_KEY)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+
+  const ov = data?.value as TravelOverride | undefined;
+  if (!ov?.timezone || !ov.until) return null;
+  if (!isValidTimezone(ov.timezone)) return null;
+  if (new Date(ov.until).getTime() <= Date.now()) return null;
+  return ov;
+}
+
+/**
+ * Load the override into the cache. Every channel turn and every schedule tick
+ * calls this before touching a clock; scripts/check-timezone-override.ts
+ * asserts that none of them forget.
+ *
+ * A Supabase blip must not put him back on Eastern mid-trip, so on error we
+ * keep whatever was already cached and only fall back to home when there is
+ * nothing to keep.
+ */
+export async function primeOwnerTimezone(): Promise<string> {
+  if (tzCache && Date.now() - tzCache.at < TZ_TTL_MS) return tzCache.tz;
+  try {
+    const ov = await readTravelOverride();
+    tzCache = { tz: ov?.timezone ?? homeTimezone(), ov, at: Date.now() };
+  } catch {
+    if (tzCache) tzCache.at = Date.now();
+    else tzCache = { tz: homeTimezone(), ov: null, at: Date.now() };
+  }
+  return tzCache.tz;
+}
+
+/** Write the override and prime the cache to it. */
+export async function writeTravelOverride(ov: TravelOverride): Promise<void> {
+  const { error } = await supabase
+    .from("channel_state")
+    .upsert({ key: TZ_KEY, value: ov, updated_at: new Date().toISOString() }, { onConflict: "key" });
+  if (error) throw new Error(error.message);
+  tzCache = { tz: ov.timezone, ov, at: Date.now() };
+}
+
+/**
+ * If a travel override has lapsed, retire it and move his repeating reminders
+ * back to home-zone wall clocks. Returns what happened, or null if there was
+ * nothing to do. reminder-poll calls this once a tick.
+ *
+ * Reads the row directly rather than through readTravelOverride, which hides
+ * lapsed overrides by design — this is the one caller that needs to see one.
+ */
+export async function expireTravelOverrideIfDue(): Promise<
+  { from: string; to: string; reanchored: number } | null
+> {
+  const { data, error } = await supabase
+    .from("channel_state")
+    .select("value")
+    .eq("key", TZ_KEY)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+
+  const ov = data?.value as TravelOverride | undefined;
+  if (!ov?.timezone || !ov.until) return null;
+  if (new Date(ov.until).getTime() > Date.now()) return null;
+
+  const home = homeTimezone();
+  await clearTravelOverride();
+  // A zone the runtime no longer resolves can't be re-anchored FROM, but the
+  // override still has to go: leaving it would pin him to a broken zone.
+  const reanchored = isValidTimezone(ov.timezone) ? await reanchorRecurring(ov.timezone, home) : 0;
+  return { from: ov.timezone, to: home, reanchored };
+}
+
+/** Drop the override and prime the cache back to home. */
+export async function clearTravelOverride(): Promise<void> {
+  const { error } = await supabase.from("channel_state").delete().eq("key", TZ_KEY);
+  if (error) throw new Error(error.message);
+  tzCache = { tz: homeTimezone(), ov: null, at: Date.now() };
 }
 
 /** The current date/time in the owner's timezone, for grounding the model. */
@@ -102,7 +268,16 @@ export function nowInOwnerTz(): string {
  * evals import it so what they exercise is what production sends.
  */
 export function ownerTimeContext(): string[] {
-  return [`Current local time: ${nowInOwnerTz()}.`];
+  const ov = activeTravelOverride();
+  if (!ov) return [`Current local time: ${nowInOwnerTz()}.`];
+  // Travel state rides here rather than in a get_timezone tool: the model needs
+  // it on every turn to answer "what time is it back home?" without a round
+  // trip, and the session prompt is captured at session.started so it would go
+  // stale the moment he switches mid-conversation.
+  return [
+    `Current local time: ${nowInOwnerTz()}. He is TRAVELING in ${ov.timezone} ` +
+      `(home zone ${homeTimezone()}), reverting automatically on ${formatLocal(ov.until)}.`,
+  ];
 }
 
 /** Format a UTC timestamp in the owner's timezone for confirmations. */
@@ -146,15 +321,33 @@ export function ownerLocalHour(): number {
 }
 
 /**
+ * Is it a civil hour to text him unprompted? Same window the follow-up curve
+ * clamps to. Anything Lucy says on her own initiative, rather than in reply,
+ * has to pass this.
+ */
+export function isWakingHour(): boolean {
+  const h = ownerLocalHour();
+  return h >= WAKING_START_HOUR && h < WAKING_END_HOUR;
+}
+
+/**
  * Convert a wall-clock time in the owner's timezone to a UTC Date, handling
  * DST correctly. Accepts "YYYY-MM-DDTHH:mm" or "YYYY-MM-DDTHH:mm:ss".
  * The model never does offset math — it just passes the time the owner said.
  */
 export function ownerWallClockToUtc(wall: string): Date | null {
+  return wallClockToUtc(wall, ownerTimezone());
+}
+
+/**
+ * The same conversion against an EXPLICIT zone. Travel mode needs to read a
+ * wall clock in one zone and re-resolve it in another, and Resy needs drop
+ * times pinned to the home zone regardless of where the owner is standing.
+ */
+export function wallClockToUtc(wall: string, tz: string): Date | null {
   const m = wall.trim().match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
   if (!m) return null;
   const [, y, mo, d, h, mi, s] = m.map(Number) as unknown as number[];
-  const tz = ownerTimezone();
 
   // Start from the naive-UTC interpretation, then correct by the difference
   // between the target wall clock and what that guess renders as in the tz.
@@ -245,6 +438,65 @@ export function nextOccurrence(fireAt: string, recurrence: string): string {
     d = next;
   } while (d.getTime() <= Date.now());
   return d.toISOString();
+}
+
+/** A UTC instant rendered as a bare "YYYY-MM-DDTHH:mm:ss" wall clock in `tz`. */
+function wallClockString(date: Date, tz: string): string {
+  const w = wallClockInTz(date, tz);
+  return `${w.year}-${pad(w.month)}-${pad(w.day)}T${pad(w.hour)}:${pad(w.minute)}:${pad(w.second)}`;
+}
+
+/**
+ * Move live RECURRING reminders so their local wall clock survives a timezone
+ * switch, and return how many moved.
+ *
+ * This is the whole reason travel mode needs a write and not just a flipped
+ * zone. fire_at is a UTC instant, and nextOccurrence steps the wall clock in
+ * whatever zone is active AT FIRE TIME — so a series crossing a switch
+ * preserves its INSTANT, not its hour. Left alone, the 7:45pm check-in would
+ * arrive at 4:45pm in San Francisco, before he has eaten dinner, and keep
+ * doing so every night of the trip.
+ *
+ * One-offs are deliberately untouched: "call mom Thursday 5pm" was agreed as a
+ * moment in time, often with someone else, and moving it would be a surprise.
+ * Recurring reminders are habits pinned to his day, so they follow him.
+ */
+export async function reanchorRecurring(fromTz: string, toTz: string): Promise<number> {
+  if (fromTz === toTz) return 0;
+
+  const { data, error } = await supabase
+    .from("reminders")
+    .select("id, fire_at, recurrence")
+    .not("recurrence", "is", null)
+    // Every live state of a series. A poll tick mid-dispatch could race this;
+    // the window is one minute and the worst case is a single occurrence
+    // delivered at the old local time, which is why it is not worth locking.
+    .in("status", ["pending", "sending", "awaiting_delivery"]);
+  if (error) throw new Error(error.message);
+
+  let moved = 0;
+  for (const row of (data ?? []) as { id: string; fire_at: string; recurrence: string }[]) {
+    const wall = wallClockString(new Date(row.fire_at), fromTz);
+    const shifted = wallClockToUtc(wall, toTz);
+    if (!shifted) continue;
+
+    // Re-anchoring can land the next occurrence in the past (eastward travel
+    // moves it earlier). Roll it forward rather than leaving a row that fires
+    // the instant the poll next ticks.
+    const fireAt =
+      shifted.getTime() <= Date.now()
+        ? nextOccurrence(shifted.toISOString(), row.recurrence)
+        : shifted.toISOString();
+    if (fireAt === row.fire_at) continue;
+
+    const { error: upErr } = await supabase
+      .from("reminders")
+      .update({ fire_at: fireAt })
+      .eq("id", row.id);
+    if (upErr) throw new Error(upErr.message);
+    moved++;
+  }
+  return moved;
 }
 
 export { supabase };

@@ -11,17 +11,18 @@ import {
 
 export default defineTool({
   description:
-    "Schedule a reminder for the owner. fireAtLocal is New York wall-clock time (America/New_York) " +
-    "with NO timezone offset — the tool handles the timezone and DST itself. When the owner says " +
-    "'5pm', pass 17:00 on the right date; never convert to UTC yourself. The reminder fires on " +
-    "the channel the request came from unless asked otherwise. Confirm the returned " +
-    "localTime back to the owner.",
+    "Schedule a reminder for the owner. fireAtLocal is his current local wall-clock time with NO " +
+    "timezone offset — the tool handles the zone and DST itself. The zone is the one named in the " +
+    "time line on every message, which follows him while he travels. When the owner says '5pm', " +
+    "pass 17:00 on the right date; never convert to UTC yourself. The reminder fires on the " +
+    "channel the request came from unless asked otherwise. Confirm the returned localTime back " +
+    "to the owner.",
   inputSchema: z.object({
     body: z.string().min(1).describe("What to remind the owner about, in plain words"),
     fireAtLocal: z
       .string()
       .min(1)
-      .describe("New York local time, YYYY-MM-DDTHH:mm (24h), e.g. 2026-07-30T17:00"),
+      .describe("Owner-local time, YYYY-MM-DDTHH:mm (24h), e.g. 2026-07-30T17:00"),
     recurrence: z
       .string()
       .optional()
@@ -40,7 +41,7 @@ export default defineTool({
     if (!fireAt) {
       return {
         ok: false as const,
-        error: "fireAtLocal must be YYYY-MM-DDTHH:mm New York local time, e.g. 2026-07-30T17:00",
+        error: "fireAtLocal must be YYYY-MM-DDTHH:mm owner-local time, e.g. 2026-07-30T17:00",
       };
     }
     if (fireAt.getTime() < Date.now() - 60_000) {

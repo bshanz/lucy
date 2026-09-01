@@ -3,7 +3,7 @@ import type { ScheduleHandlerArgs } from "eve/schedules";
 import sendblue from "#channels/sendblue.js";
 import slack from "#channels/slack.js";
 import { buildNewEmailRaw, findSentMessage, sendEmail } from "#lib/gmail.js";
-import { formatLocal } from "#lib/reminders.js";
+import { formatLocal, primeOwnerTimezone } from "#lib/reminders.js";
 import { STUCK_MS, supabase, type ScheduledEmailRow } from "#lib/scheduled-email.js";
 
 /**
@@ -109,6 +109,8 @@ export default defineSchedule({
       console.warn("[email-send] Supabase env not set; skipping");
       return;
     }
+    // Load any travel override before any clock is read; see primeOwnerTimezone.
+    await primeOwnerTimezone();
 
     // --- 0. Rows orphaned by a crash between the claim and the send.
     //

@@ -6,19 +6,19 @@ export default defineTool({
   description:
     "Move a reminder to a new time — works for upcoming reminders AND fired-but-unconfirmed " +
     "ones (e.g. the owner says 'push it to Friday' after a follow-up) — including ones that " +
-    "already ran out of nudges. New York wall-clock time, no offset. Resets the follow-up cycle, " +
+    "already ran out of nudges. Owner-local wall-clock time, no offset. Resets the follow-up cycle, " +
     "so the full run of nudges starts over from the new fire time.",
   inputSchema: z.object({
     id: z.string().uuid().describe("The reminder id to reschedule"),
     fireAtLocal: z
       .string()
       .min(1)
-      .describe("New fire time, NY local YYYY-MM-DDTHH:mm, e.g. 2026-08-01T17:00"),
+      .describe("New fire time, owner-local YYYY-MM-DDTHH:mm, e.g. 2026-08-01T17:00"),
   }),
   async execute({ id, fireAtLocal }) {
     const fireAt = ownerWallClockToUtc(fireAtLocal);
     if (!fireAt) {
-      return { ok: false as const, error: "fireAtLocal must be YYYY-MM-DDTHH:mm NY local time" };
+      return { ok: false as const, error: "fireAtLocal must be YYYY-MM-DDTHH:mm owner-local time" };
     }
     if (fireAt.getTime() < Date.now() - 60_000) {
       return { ok: false as const, error: "That time is in the past — re-check the date" };

@@ -2,7 +2,7 @@ import { defineSchedule } from "eve/schedules";
 import sendblue from "#channels/sendblue.js";
 import { getAuthToken, redact, sessionExpiresAt } from "#lib/resy.js";
 import { ensureResyStore, loadResyTokens } from "#lib/resy-store.js";
-import { ownerLocalHour } from "#lib/reminders.js";
+import { ownerLocalHour, primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 /**
@@ -64,6 +64,8 @@ export default defineSchedule({
   cron: "0 * * * *",
   async run({ receive, appAuth }) {
     if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SECRET_KEY) return;
+    // Load any travel override before any clock is read; see primeOwnerTimezone.
+    await primeOwnerTimezone();
     if (ownerLocalHour() !== REFRESH_HOUR) return;
     ensureResyStore();
 

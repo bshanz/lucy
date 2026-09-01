@@ -7,7 +7,7 @@ import { isRunningStaleCode, recordPinnedDeployment } from "#lib/deployment.js";
 import { gmailConnectorUid, OWNER_SUBJECT, ownerEmailAddress } from "#lib/gmail.js";
 import { toImessageText } from "#lib/imessage-format.js";
 import { buildTurnMessage, hasPayload } from "#lib/inbound-media.js";
-import { ownerTimeContext } from "#lib/reminders.js";
+import { ownerTimeContext, primeOwnerTimezone } from "#lib/reminders.js";
 import { markRead, sendMessage, sendTypingIndicator } from "#lib/sendblue.js";
 import { supabase } from "#lib/supabase.js";
 
@@ -405,6 +405,8 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
         (async () => {
           // Claimed above, so the receipt is honest: Lucy has this one.
           await markRead(phone, body.to_number).catch(() => {});
+          // Load any travel override before the clock is read; see primeOwnerTimezone.
+          await primeOwnerTimezone();
           const context = ownerTimeContext();
           const options = {
             auth: sendblueAuth(phone),
@@ -433,6 +435,7 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
   // Used by the sendblue-poll and reminder-poll schedules.
   async receive(input, { send }) {
     const phone = input.target.phone;
+    await primeOwnerTimezone();
     const context = ownerTimeContext();
     const options = {
       auth: input.auth ?? sendblueAuth(phone),

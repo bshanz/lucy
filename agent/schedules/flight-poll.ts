@@ -17,7 +17,7 @@ import {
   summarizeItinerary,
   type FlightWatchRow,
 } from "#lib/flights.js";
-import { ownerLocalHour } from "#lib/reminders.js";
+import { ownerLocalHour, primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 /**
@@ -133,6 +133,8 @@ export default defineSchedule({
       console.warn("[flight-poll] SerpAPI / Supabase env not set; skipping");
       return;
     }
+    // Load any travel override before any clock is read; see primeOwnerTimezone.
+    await primeOwnerTimezone();
     if (ownerLocalHour() !== pollHour()) return;
 
     const today = ownerToday();

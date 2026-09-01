@@ -14,7 +14,7 @@ import { formatLocal, ownerTimezone, ownerWallClockToUtc } from "#lib/reminders.
 export default defineTool({
   description:
     "Change an existing event on the owner's Google Calendar — retitle it, move it, or add " +
-    "and remove guests. Get the eventId from list_calendar_events. Times are NY wall-clock " +
+    "and remove guests. Get the eventId from list_calendar_events. Times are owner-local wall-clock " +
     "(no offsets). Anything that touches an event with guests emails all of them, so those " +
     "calls REQUIRE the owner's approval.",
   inputSchema: z.object({
@@ -23,8 +23,8 @@ export default defineTool({
     startLocal: z
       .string()
       .optional()
-      .describe("New start, NY local time YYYY-MM-DDTHH:mm; the duration is kept if no end"),
-    endLocal: z.string().optional().describe("New end, NY local time YYYY-MM-DDTHH:mm"),
+      .describe("New start, owner-local YYYY-MM-DDTHH:mm; the duration is kept if no end"),
+    endLocal: z.string().optional().describe("New end, owner-local YYYY-MM-DDTHH:mm"),
     description: z.string().optional(),
     location: z.string().optional(),
     addAttendees: z

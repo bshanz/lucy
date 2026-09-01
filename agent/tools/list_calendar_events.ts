@@ -6,18 +6,18 @@ import { formatLocal, ownerTimezone, ownerWallClockToUtc } from "#lib/reminders.
 
 export default defineTool({
   description:
-    "List events on the owner's Google Calendar in a New York local-time window. Defaults to " +
-    "the next 7 days. Times in and out are NY wall-clock (no offsets). Each event carries its " +
+    "List events on the owner's Google Calendar in an owner-local time window. Defaults to " +
+    "the next 7 days. Times in and out are owner-local wall-clock (no offsets). Each event carries its " +
     "id (pass it to update_calendar_event) and its guests with their RSVP status.",
   inputSchema: z.object({
     fromLocal: z
       .string()
       .optional()
-      .describe("Window start, NY local time YYYY-MM-DDTHH:mm; defaults to now"),
+      .describe("Window start, owner-local YYYY-MM-DDTHH:mm; defaults to now"),
     toLocal: z
       .string()
       .optional()
-      .describe("Window end, NY local time YYYY-MM-DDTHH:mm; defaults to 7 days out"),
+      .describe("Window end, owner-local YYYY-MM-DDTHH:mm; defaults to 7 days out"),
     maxResults: z.number().int().min(1).max(50).optional().describe("Default 15"),
   }),
   async execute({ fromLocal, toLocal, maxResults }) {
@@ -26,7 +26,7 @@ export default defineTool({
       ? ownerWallClockToUtc(toLocal)
       : new Date(Date.now() + 7 * 24 * 3600 * 1000);
     if (!timeMin || !timeMax) {
-      return { ok: false as const, error: "Times must be NY local YYYY-MM-DDTHH:mm" };
+      return { ok: false as const, error: "Times must be owner-local YYYY-MM-DDTHH:mm" };
     }
 
     const params = new URLSearchParams({

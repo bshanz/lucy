@@ -4,6 +4,7 @@ import sendblue, { sendblueAuth } from "#channels/sendblue.js";
 import { buildTurnMessage, hasPayload } from "#lib/inbound-media.js";
 import { fetchRecentInbound, markRead, messageKey, sendTypingIndicator } from "#lib/sendblue.js";
 import { supabase } from "#lib/supabase.js";
+import { primeOwnerTimezone } from "#lib/reminders.js";
 
 /**
  * Free-sandbox ingress: Sendblue has no webhooks on the free tier, so this
@@ -102,6 +103,8 @@ export default defineSchedule({
       console.warn("[sendblue-poll] OWNER_PHONE / Sendblue / Supabase env not set; skipping");
       return;
     }
+    // Load any travel override before any clock is read; see primeOwnerTimezone.
+    await primeOwnerTimezone();
 
     for (let pass = 0; pass < PASSES; pass++) {
       try {

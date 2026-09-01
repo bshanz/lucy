@@ -1,6 +1,6 @@
 import { slackChannel, defaultSlackAuth, type SlackMessage } from "eve/channels/slack";
 import { connectSlackCredentials } from "@vercel/connect/eve";
-import { ownerTimeContext } from "#lib/reminders.js";
+import { ownerTimeContext, primeOwnerTimezone } from "#lib/reminders.js";
 
 /**
  * Slack channel — Lucy's instant surface. Credentials (bot token + webhook
@@ -33,16 +33,19 @@ function ownerOnly(message: SlackMessage) {
 export default slackChannel({
   credentials: connectSlackCredentials("slack/lucy"),
 
-  onDirectMessage(ctx, message) {
+  async onDirectMessage(ctx, message) {
     if (!ownerOnly(message)) return null;
+    // Load any travel override before the clock is read; see primeOwnerTimezone.
+    await primeOwnerTimezone();
     return {
       auth: withChannelAttr(defaultSlackAuth(message, ctx), message),
       context: ownerTimeContext(),
     };
   },
 
-  onAppMention(ctx, message) {
+  async onAppMention(ctx, message) {
     if (!ownerOnly(message)) return null;
+    await primeOwnerTimezone();
     return {
       auth: withChannelAttr(defaultSlackAuth(message, ctx), message),
       context: ownerTimeContext(),

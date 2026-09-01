@@ -27,7 +27,7 @@ import {
   type ResySnipeRow,
 } from "#lib/resy.js";
 import { ensureResyStore } from "#lib/resy-store.js";
-import { formatLocal } from "#lib/reminders.js";
+import { formatLocal, primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 /**
@@ -567,6 +567,8 @@ export default defineSchedule({
     // snipe on exactly the accounts this feature is built for. Whether Resy is
     // connected lives in the database, and the claim below returns zero rows
     // when nothing is armed anyway.
+    // Load any travel override before any clock is read; see primeOwnerTimezone.
+    await primeOwnerTimezone();
     ensureResyStore();
 
     const now = Date.now();

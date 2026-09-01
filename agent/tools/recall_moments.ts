@@ -36,8 +36,8 @@ export default defineTool({
       .optional()
       .describe("Keyword or list of keywords; any one matching is a hit (literal substrings)"),
     category: z.string().optional().describe("food, activity, social, health, travel, entertainment, work"),
-    fromLocal: z.string().optional().describe("Window start, NY local YYYY-MM-DDTHH:mm"),
-    toLocal: z.string().optional().describe("Window end, NY local YYYY-MM-DDTHH:mm"),
+    fromLocal: z.string().optional().describe("Window start, owner-local YYYY-MM-DDTHH:mm"),
+    toLocal: z.string().optional().describe("Window end, owner-local YYYY-MM-DDTHH:mm"),
     limit: z.number().int().min(1).max(100).optional().describe("Default 30"),
   }),
   async execute({ query, category, fromLocal, toLocal, limit }) {
