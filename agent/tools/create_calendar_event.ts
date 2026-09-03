@@ -1,7 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { insertEvent, normalizeAttendees } from "#lib/calendar.js";
-import { formatLocal, ownerTimezone, ownerWallClockToUtc } from "#lib/reminders.js";
+import { formatLocal, ownerTimezone, ownerWallClockToUtc, primeOwnerTimezone } from "#lib/reminders.js";
 
 export default defineTool({
   description:
@@ -33,6 +33,9 @@ export default defineTool({
   approval: ({ toolInput }) =>
     (toolInput?.attendees?.length ?? 0) > 0 ? "user-approval" : "not-applicable",
   async execute({ title, startLocal, endLocal, description, location, attendees }) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     const start = ownerWallClockToUtc(startLocal);
     if (!start) return { ok: false as const, error: "startLocal must be YYYY-MM-DDTHH:mm" };
     const end = endLocal

@@ -11,7 +11,7 @@ import {
   routeLabel,
   type FlightWatchRow,
 } from "#lib/flights.js";
-import { formatLocal } from "#lib/reminders.js";
+import { formatLocal, primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 /**
@@ -55,6 +55,9 @@ export default defineTool({
       .describe("Also show cancelled, paused and expired watches; default false"),
   }),
   async execute({ includeInactive }) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     const statuses = includeInactive
       ? ["active", "paused", "expired", "cancelled"]
       : ["active", "paused"];

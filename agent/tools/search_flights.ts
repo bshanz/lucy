@@ -14,6 +14,7 @@ import {
   routeLabel,
   searchFlights,
 } from "#lib/flights.js";
+import { primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 export default defineTool({
@@ -49,6 +50,9 @@ export default defineTool({
     maxPrice: z.number().int().min(1).optional().describe("USD ceiling"),
   }),
   async execute(input) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     const route = checkRoute(input);
     if (!route.ok) return { ok: false as const, error: route.error };
 

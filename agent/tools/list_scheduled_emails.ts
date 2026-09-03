@@ -1,6 +1,6 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import { formatLocal } from "#lib/reminders.js";
+import { formatLocal, primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/scheduled-email.js";
 
 export default defineTool({
@@ -12,6 +12,9 @@ export default defineTool({
     filter: z.enum(["queued", "recent"]).optional(),
   }),
   async execute({ filter }) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     const query = supabase
       .from("scheduled_emails")
       .select("id, to_address, subject, body, send_at, status, sent_at, last_error")

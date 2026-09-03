@@ -1,7 +1,7 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { formatTime, formatUsd, hhmm, type ResySnipeRow } from "#lib/resy.js";
-import { formatLocal } from "#lib/reminders.js";
+import { formatLocal, primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 export default defineTool({
@@ -16,6 +16,9 @@ export default defineTool({
       .describe("Also show booked/missed/failed/cancelled from the last 30 days. Default false."),
   }),
   async execute({ includeFinished }) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     const base = supabase.from("resy_snipes").select("*");
 
     // Filters must precede .order()/.returns() — the transform builder drops

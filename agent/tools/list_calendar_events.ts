@@ -2,7 +2,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 import type { GcalEvent } from "#lib/calendar.js";
 import { googleApiFetch } from "#lib/gmail.js";
-import { formatLocal, ownerTimezone, ownerWallClockToUtc } from "#lib/reminders.js";
+import { formatLocal, ownerTimezone, ownerWallClockToUtc, primeOwnerTimezone } from "#lib/reminders.js";
 
 export default defineTool({
   description:
@@ -21,6 +21,9 @@ export default defineTool({
     maxResults: z.number().int().min(1).max(50).optional().describe("Default 15"),
   }),
   async execute({ fromLocal, toLocal, maxResults }) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     const timeMin = fromLocal ? ownerWallClockToUtc(fromLocal) : new Date();
     const timeMax = toLocal
       ? ownerWallClockToUtc(toLocal)

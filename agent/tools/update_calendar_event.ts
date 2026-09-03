@@ -9,7 +9,7 @@ import {
   patchEvent,
   shiftedEnd,
 } from "#lib/calendar.js";
-import { formatLocal, ownerTimezone, ownerWallClockToUtc } from "#lib/reminders.js";
+import { formatLocal, ownerTimezone, ownerWallClockToUtc, primeOwnerTimezone } from "#lib/reminders.js";
 
 export default defineTool({
   description:
@@ -53,6 +53,9 @@ export default defineTool({
     }
   },
   async execute(input) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     const {
       eventId,
       title,

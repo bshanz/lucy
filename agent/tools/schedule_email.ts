@@ -1,7 +1,7 @@
 import { defineTool } from "eve/tools";
 import { always } from "eve/tools/approval";
 import { z } from "zod";
-import { formatLocal, nowInOwnerTz, ownerWallClockToUtc } from "#lib/reminders.js";
+import { formatLocal, nowInOwnerTz, ownerWallClockToUtc, primeOwnerTimezone } from "#lib/reminders.js";
 import { MAX_SCHEDULED, MIN_LEAD_MS, supabase } from "#lib/scheduled-email.js";
 
 export default defineTool({
@@ -34,6 +34,9 @@ export default defineTool({
   }),
   approval: always(),
   async execute(input, ctx) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     const sendAt = ownerWallClockToUtc(input.sendAtLocal);
     if (!sendAt) {
       return {

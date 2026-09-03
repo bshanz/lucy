@@ -13,7 +13,7 @@ import {
   venueLookup,
 } from "#lib/resy.js";
 import { ensureResyStore } from "#lib/resy-store.js";
-import { formatLocal } from "#lib/reminders.js";
+import { formatLocal, primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -100,6 +100,11 @@ export default defineTool({
   }),
   approval: spendApproval,
   async execute(input, ctx) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    // Drop times stay pinned to the home zone regardless; this is for the
+    // local-time confirmations only.
+    await primeOwnerTimezone();
     ensureResyStore();
 
     // 1. Shape checks first — all free, and a bad window is the failure mode

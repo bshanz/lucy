@@ -5,6 +5,7 @@ import {
   nowInOwnerTz,
   ownerWallClockToUtc,
   parseRecurrence,
+  primeOwnerTimezone,
   supabase,
   type ReminderChannel,
 } from "#lib/reminders.js";
@@ -37,6 +38,9 @@ export default defineTool({
       .describe("Where the reminder should fire; defaults to the current channel"),
   }),
   async execute(input, ctx) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     const fireAt = ownerWallClockToUtc(input.fireAtLocal);
     if (!fireAt) {
       return {

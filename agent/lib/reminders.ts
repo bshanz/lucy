@@ -82,6 +82,16 @@ export function parseRecurrence(r: string): string | null {
  * function in this file. So the override is cached in module scope and every
  * ingress path primes it first. A path that forgets falls back to the home
  * zone — degraded to today's behaviour, never broken.
+ *
+ * "Every ingress path" is not enough on its own, and this was learned the hard
+ * way. A turn runs as a durable workflow, and each step — every model call,
+ * every tool execute() — is its own function invocation, routinely on a
+ * different instance from the cron tick or webhook that primed the cache and
+ * handed the message over. So a tool sees a COLD cache no matter how carefully
+ * the channel primed. "Remind me at 7am", typed in San Francisco with travel
+ * mode on, was resolved as 7am Eastern and delivered at 4am Pacific; nothing
+ * errored. Every tool that reads a clock therefore primes for itself at the
+ * top of execute(), and scripts/check-timezone-override.ts greps for that too.
  */
 export type TravelOverride = {
   /** IANA zone he's currently in. */
@@ -132,13 +142,18 @@ export function isValidTimezone(tz: string): boolean {
 }
 
 /**
- * The zone to interpret every wall clock in. Falls back to home whenever the
- * cache is cold, which is the conservative direction: an unprimed path behaves
- * exactly as it did before travel mode existed.
+ * The zone to interpret every wall clock in. Falls back to home only when the
+ * cache has NEVER been primed on this instance, which is the conservative
+ * direction: an unprimed path behaves exactly as it did before travel mode
+ * existed.
+ *
+ * Past the TTL it serves the last primed value rather than home. The TTL says
+ * when the next prime must re-read the row; it is not evidence he went home.
+ * Silently reverting a warm instance to Eastern sixty seconds into a turn is
+ * the same bug as never priming, just with worse timing.
  */
 export function ownerTimezone(): string {
-  if (tzCache && Date.now() - tzCache.at < TZ_TTL_MS) return tzCache.tz;
-  return homeTimezone();
+  return tzCache ? tzCache.tz : homeTimezone();
 }
 
 /**
@@ -147,8 +162,7 @@ export function ownerTimezone(): string {
  * as "no travel note to show", never as proof he is home.
  */
 export function activeTravelOverride(): TravelOverride | null {
-  if (tzCache && Date.now() - tzCache.at < TZ_TTL_MS) return tzCache.ov;
-  return null;
+  return tzCache ? tzCache.ov : null;
 }
 
 /**

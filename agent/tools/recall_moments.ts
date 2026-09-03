@@ -1,6 +1,6 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import { formatLocal, ownerWallClockToUtc } from "#lib/reminders.js";
+import { formatLocal, ownerWallClockToUtc, primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 /**
@@ -41,6 +41,9 @@ export default defineTool({
     limit: z.number().int().min(1).max(100).optional().describe("Default 30"),
   }),
   async execute({ query, category, fromLocal, toLocal, limit }) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     let from: string | undefined;
     if (fromLocal) {
       const parsed = ownerWallClockToUtc(fromLocal);

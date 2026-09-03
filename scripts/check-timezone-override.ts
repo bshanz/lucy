@@ -139,6 +139,28 @@ for (const dir of ["agent/channels", "agent/schedules"]) {
   }
 }
 
+// --- 6b. And so must every TOOL that reads a clock. Priming at ingress is not
+// enough: a turn is a durable workflow whose every step — each tool call
+// included — is its own function invocation, so the tool runs on a cold cache
+// however carefully the channel primed. This is exactly how "remind me at 7am"
+// typed in San Francisco came out as 7am Eastern and landed at 4am Pacific.
+// A tool that imports any clock helper from reminders.js, or ownerToday from
+// flights.js (which is "today" in the owner's zone), has to prime itself.
+console.log("\n-- every clock-reading tool primes the cache --");
+for (const file of readdirSync("agent/tools").filter((f) => f.endsWith(".ts"))) {
+  const src = readFileSync(`agent/tools/${file}`, "utf8");
+  const fromReminders =
+    src.match(/import\s*\{([^}]*)\}\s*from\s*"#lib\/reminders\.js"/)?.[1] ?? "";
+  const clockNames = fromReminders
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s && !/^(supabase|parseRecurrence|type\s)/.test(s) && s !== "primeOwnerTimezone");
+  const fromFlights = src.match(/import\s*\{([^}]*)\}\s*from\s*"#lib\/flights\.js"/)?.[1] ?? "";
+  const usesToday = /\bownerToday\b/.test(fromFlights);
+  if (clockNames.length === 0 && !usesToday) continue;
+  check(`agent/tools/${file} calls primeOwnerTimezone`, /await primeOwnerTimezone\(\)/.test(src), true);
+}
+
 // --- 7. Resy drop times must NOT follow him. A drop time belongs to the
 // restaurant; if computeDropAt went back to the current zone, every snipe armed
 // before a trip would shift by the offset mid-flight and lose the table by

@@ -1,6 +1,6 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import { formatLocal, supabase } from "#lib/reminders.js";
+import { formatLocal, primeOwnerTimezone, supabase } from "#lib/reminders.js";
 
 export default defineTool({
   description:
@@ -13,6 +13,9 @@ export default defineTool({
     filter: z.enum(["upcoming", "awaiting_confirmation", "all"]).optional(),
   }),
   async execute({ filter }) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     // 'awaiting_delivery' reads as upcoming, never as awaiting_confirmation:
     // the owner has not been told yet, so asking him to confirm it would be
     // asking about a message he never received.

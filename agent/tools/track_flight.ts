@@ -13,6 +13,7 @@ import {
   searchFlights,
   summarizeItinerary,
 } from "#lib/flights.js";
+import { primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 export default defineTool({
@@ -52,6 +53,9 @@ export default defineTool({
       .describe("USD price to alert at — 'tell me if it goes under $500' → 500"),
   }),
   async execute(input, ctx) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     const route = checkRoute(input);
     if (!route.ok) return { ok: false as const, error: route.error };
 

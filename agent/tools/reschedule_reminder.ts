@@ -1,6 +1,6 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import { formatLocal, ownerWallClockToUtc, supabase } from "#lib/reminders.js";
+import { formatLocal, ownerWallClockToUtc, primeOwnerTimezone, supabase } from "#lib/reminders.js";
 
 export default defineTool({
   description:
@@ -16,6 +16,9 @@ export default defineTool({
       .describe("New fire time, owner-local YYYY-MM-DDTHH:mm, e.g. 2026-08-01T17:00"),
   }),
   async execute({ id, fireAtLocal }) {
+    // Tools run in their own workflow step, not in the invocation that primed
+    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
+    await primeOwnerTimezone();
     const fireAt = ownerWallClockToUtc(fireAtLocal);
     if (!fireAt) {
       return { ok: false as const, error: "fireAtLocal must be YYYY-MM-DDTHH:mm owner-local time" };
