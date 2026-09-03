@@ -6,6 +6,7 @@ import {
   ResyError,
   computeDropAt,
   dropAtForBookingWindow,
+  formatResyTime,
   formatTime,
   formatUsd,
   redact,
@@ -13,7 +14,6 @@ import {
   venueLookup,
 } from "#lib/resy.js";
 import { ensureResyStore } from "#lib/resy-store.js";
-import { formatLocal, primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 const TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -25,7 +25,9 @@ export default defineTool({
     "REQUIRES the owner's explicit approval — he sees the venue, date, party size, time window " +
     "and deposit cap on a card first, and THAT CARD IS THE AUTHORIZATION for a real booking " +
     "with a real cancellation fee. Get venueId and venueName from search_resy first. " +
-    "State the drop time back to him in his local time and get a clear yes. " +
+    "State the drop time back to him exactly as `dropsAt` is returned — it is in his HOME " +
+    "zone, because a drop belongs to the restaurant and never follows his travel — and get a " +
+    "clear yes. " +
     "If you KNOW the exact release time, give dropAtLocal (or daysAhead + dropTimeLocal). " +
     "IF YOU DON'T KNOW IT, don't guess and don't ask him to guess either — give a watch window " +
     "(watchFromLocal + watchUntilLocal) covering the likely hours, and Lucy books the moment " +
@@ -100,11 +102,9 @@ export default defineTool({
   }),
   approval: spendApproval,
   async execute(input, ctx) {
-    // Tools run in their own workflow step, not in the invocation that primed
-    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
-    // Drop times stay pinned to the home zone regardless; this is for the
-    // local-time confirmations only.
-    await primeOwnerTimezone();
+    // No primeOwnerTimezone here, on purpose: nothing in this tool reads the
+    // current zone. Drop times resolve and render in the HOME zone (see
+    // computeDropAt / formatResyTime), so travel mode cannot touch a snipe.
     ensureResyStore();
 
     // 1. Shape checks first — all free, and a bad window is the failure mode
@@ -213,7 +213,7 @@ export default defineTool({
       return {
         ok: false as const,
         error:
-          `That drop time (${formatLocal(dropAt.toISOString())}) has already passed. If tables ` +
+          `That drop time (${formatResyTime(dropAt.toISOString())}) has already passed. If tables ` +
           `are already out, check resy_availability and book directly instead of sniping.`,
       };
     }
@@ -334,13 +334,13 @@ export default defineTool({
       preferred: input.preferredTime ? formatTime(input.preferredTime) : null,
       tablePreference: input.slotTypes?.length ? input.slotTypes : "any",
       maxDeposit: maxDepositCents === 0 ? "none — I'll skip anything needing a card" : formatUsd(maxDepositCents),
-      // Echo the RESOLVED instant back in owner-local terms. The owner is about
-      // to approve this card; a drop time computed an hour off is only catchable
-      // here, by him, before it's armed.
-      dropsAt: dropAt ? formatLocal(dropAt.toISOString()) : null,
+      // Echo the RESOLVED instant back in HOME-zone terms, the zone it was
+      // computed in. The owner is about to approve this card; a drop time
+      // computed an hour off is only catchable here, by him, before it's armed.
+      dropsAt: dropAt ? formatResyTime(dropAt.toISOString()) : null,
       watching:
         watchFrom && watchUntil
-          ? `${formatLocal(watchFrom.toISOString())} until ${formatLocal(watchUntil.toISOString())}`
+          ? `${formatResyTime(watchFrom.toISOString())} until ${formatResyTime(watchUntil.toISOString())}`
           : null,
       armedSnipes: (count ?? 0) + 1,
       maxSnipes: MAX_ACTIVE_SNIPES,

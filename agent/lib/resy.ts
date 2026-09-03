@@ -1,4 +1,4 @@
-import { homeTimezone, wallClockToUtc } from "#lib/reminders.js";
+import { formatHome, homeTimezone, wallClockToUtc } from "#lib/reminders.js";
 
 /**
  * Resy client + the pure logic behind reservation sniping.
@@ -1090,6 +1090,17 @@ export function formatUsd(cents: number): string {
  */
 export function computeDropAt(wallClockLocal: string): Date | null {
   return wallClockToUtc(wallClockLocal, homeTimezone());
+}
+
+/**
+ * How a Resy instant — a drop, a watch window, the moment inventory appeared —
+ * is shown to the owner. Pinned to the home zone like computeDropAt, and for
+ * the same reason: travel mode must not touch Resy at all. The drop time on the
+ * approval card and the one in list_resy_snipes a week later have to be the
+ * same words, or a snipe that was armed correctly starts looking wrong.
+ */
+export function formatResyTime(iso: string): string {
+  return formatHome(iso);
 }
 
 /**

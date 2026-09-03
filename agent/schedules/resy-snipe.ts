@@ -15,6 +15,7 @@ import {
   describeSlot,
   findReservationFor,
   findSlots,
+  formatResyTime,
   formatTime,
   formatUsd,
   getAuthToken,
@@ -27,7 +28,7 @@ import {
   type ResySnipeRow,
 } from "#lib/resy.js";
 import { ensureResyStore } from "#lib/resy-store.js";
-import { formatLocal, primeOwnerTimezone } from "#lib/reminders.js";
+import { primeOwnerTimezone } from "#lib/reminders.js";
 import { supabase } from "#lib/supabase.js";
 
 /**
@@ -508,7 +509,7 @@ async function finish(
   // lost race that measured the drop is not a wasted morning.
   const measured = snipe.detected_at
     ? ` You were watching a window rather than a known drop time, and inventory ` +
-      `actually appeared at ${formatLocal(snipe.detected_at)} — tell him that, ` +
+      `actually appeared at ${formatResyTime(snipe.detected_at)} — tell him that, ` +
       `briefly, as something useful you now know about this restaurant.`
     : "";
 

@@ -1,7 +1,6 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
-import { formatTime, formatUsd, hhmm, type ResySnipeRow } from "#lib/resy.js";
-import { formatLocal, primeOwnerTimezone } from "#lib/reminders.js";
+import { formatResyTime, formatTime, formatUsd, hhmm, type ResySnipeRow } from "#lib/resy.js";
 import { supabase } from "#lib/supabase.js";
 
 export default defineTool({
@@ -16,9 +15,8 @@ export default defineTool({
       .describe("Also show booked/missed/failed/cancelled from the last 30 days. Default false."),
   }),
   async execute({ includeFinished }) {
-    // Tools run in their own workflow step, not in the invocation that primed
-    // the zone at ingress, so the cache is cold here. See primeOwnerTimezone.
-    await primeOwnerTimezone();
+    // Deliberately unprimed: every time here renders in the HOME zone via
+    // formatResyTime, so an armed snipe reads the same before and during a trip.
     const base = supabase.from("resy_snipes").select("*");
 
     // Filters must precede .order()/.returns() — the transform builder drops
@@ -50,10 +48,10 @@ export default defineTool({
         // Lucy sits across because the venue's release time isn't known. Say
         // which it is — "watching 8–11am" and "fires at 9:00" set very
         // different expectations about how exact this is.
-        dropsAt: s.drop_at ? formatLocal(s.drop_at) : null,
+        dropsAt: s.drop_at ? formatResyTime(s.drop_at) : null,
         watching:
           s.watch_from && s.watch_until
-            ? `${formatLocal(s.watch_from)} until ${formatLocal(s.watch_until)}`
+            ? `${formatResyTime(s.watch_from)} until ${formatResyTime(s.watch_until)}`
             : null,
         status: s.status,
         // Only present once it has fired. Quote these rather than paraphrasing —

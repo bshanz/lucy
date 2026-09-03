@@ -296,8 +296,21 @@ export function ownerTimeContext(): string[] {
 
 /** Format a UTC timestamp in the owner's timezone for confirmations. */
 export function formatLocal(iso: string): string {
+  return formatInZone(iso, ownerTimezone());
+}
+
+/**
+ * The same, pinned to the HOME zone regardless of travel. For things that
+ * belong to a place rather than to him — Resy drop times above all — so the
+ * card he approves before a trip reads the same as the one he checks during it.
+ */
+export function formatHome(iso: string): string {
+  return formatInZone(iso, homeTimezone());
+}
+
+function formatInZone(iso: string, timeZone: string): string {
   return new Intl.DateTimeFormat("en-US", {
-    timeZone: ownerTimezone(),
+    timeZone,
     weekday: "short",
     month: "short",
     day: "numeric",

@@ -175,6 +175,15 @@ check("resy.ts resolves drop times against homeTimezone", /homeTimezone\(\)/.tes
 check("resy.ts imports homeTimezone", /\bhomeTimezone\b/.test(resyImports), true);
 check("resy.ts does not import ownerTimezone", /\bownerTimezone\b/.test(resyImports), false);
 check("resy.ts does not import ownerWallClockToUtc", /\bownerWallClockToUtc\b/.test(resyImports), false);
+// Display too, not just arithmetic. The drop time on the approval card and the
+// one list_resy_snipes shows mid-trip must be the same words, so the Resy
+// tools and schedule render through formatResyTime (home zone), never
+// formatLocal (current zone).
+for (const file of ["agent/tools/snipe_resy.ts", "agent/tools/list_resy_snipes.ts", "agent/schedules/resy-snipe.ts"]) {
+  const src = readFileSync(file, "utf8");
+  check(`${file} does not use formatLocal`, /\bformatLocal\b/.test(src), false);
+  check(`${file} renders Resy times via formatResyTime`, /\bformatResyTime\(/.test(src), true);
+}
 
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);
