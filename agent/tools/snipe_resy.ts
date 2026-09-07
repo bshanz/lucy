@@ -99,6 +99,16 @@ export default defineTool({
       .string()
       .optional()
       .describe("End of the watch window, owner-local 'YYYY-MM-DDTHH:MM'. Requires watchFromLocal."),
+    expectedDropLocal: z
+      .string()
+      .optional()
+      .describe(
+        "Optional, watch windows only: where INSIDE the window the release most likely lands, " +
+          "owner-local 'YYYY-MM-DDTHH:MM'. Use it when past drops at this venue give a rough " +
+          "time (recall_memories) but not one worth betting the whole night on. Lucy polls " +
+          "once a minute across the window and every 3 seconds for the 45 minutes either side " +
+          "of this moment. Wrong by an hour costs latency, not the watch.",
+      ),
   }),
   approval: spendApproval,
   async execute(input, ctx) {
@@ -154,6 +164,7 @@ export default defineTool({
     let dropAt: Date | null = null;
     let watchFrom: Date | null = null;
     let watchUntil: Date | null = null;
+    let expectedDrop: Date | null = null;
 
     if (input.watchFromLocal || input.watchUntilLocal) {
       if (!input.watchFromLocal || !input.watchUntilLocal) {
@@ -184,6 +195,30 @@ export default defineTool({
       if (watchUntil.getTime() <= Date.now()) {
         return { ok: false as const, error: "That watch window has already passed." };
       }
+      if (input.expectedDropLocal) {
+        expectedDrop = computeDropAt(input.expectedDropLocal);
+        if (!expectedDrop) {
+          return {
+            ok: false as const,
+            error: "Couldn't read expectedDropLocal. Use YYYY-MM-DDTHH:MM with no offset.",
+          };
+        }
+        if (expectedDrop < watchFrom || expectedDrop > watchUntil) {
+          return {
+            ok: false as const,
+            error:
+              `expectedDropLocal (${formatResyTime(expectedDrop.toISOString())}) is outside the ` +
+              `watch window. It has to fall inside it — widen the window or move the expectation.`,
+          };
+        }
+      }
+    } else if (input.expectedDropLocal) {
+      return {
+        ok: false as const,
+        error:
+          "expectedDropLocal only makes sense with a watch window — with an exact drop time " +
+          "there's nothing to sharpen.",
+      };
     } else if (input.dropAtLocal) {
       dropAt = computeDropAt(input.dropAtLocal);
       if (!dropAt) {
@@ -304,6 +339,7 @@ export default defineTool({
         drop_at: dropAt ? dropAt.toISOString() : null,
         watch_from: watchFrom ? watchFrom.toISOString() : null,
         watch_until: watchUntil ? watchUntil.toISOString() : null,
+        expected_drop_at: expectedDrop ? expectedDrop.toISOString() : null,
       })
       .select("id")
       .single();
@@ -342,6 +378,10 @@ export default defineTool({
         watchFrom && watchUntil
           ? `${formatResyTime(watchFrom.toISOString())} until ${formatResyTime(watchUntil.toISOString())}`
           : null,
+      // Say it if it's set: "watching all weekend, hardest around 12:50am Saturday"
+      // is a different promise from "watching all weekend", and he should hear
+      // which one he's approving.
+      pollingHardestAround: expectedDrop ? formatResyTime(expectedDrop.toISOString()) : null,
       armedSnipes: (count ?? 0) + 1,
       maxSnipes: MAX_ACTIVE_SNIPES,
     };

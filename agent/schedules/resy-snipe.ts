@@ -100,6 +100,19 @@ const FALLBACK_GRACE_POLLS = 4;
  * because the cron already ticks every minute.
  */
 const DROP_WINDOW_MAX_MS = 6 * 3600_000;
+/**
+ * How far either side of `expected_drop_at` a cancellation watch runs HOT.
+ *
+ * The two cadences above force a choice between coverage and speed, and a venue
+ * whose release is known only roughly loses either way: a wide watch at 1/min
+ * is up to 60s late (Le Café Louis Vuitton, 2026-09-06 — four tables seen, all
+ * gone by the time /book was called), while a 90-minute window at 3s loses the
+ * night outright if the batch job runs late. So a wide watch may carry an
+ * expected instant, and only the ticks near it poll hard. ±45min is wider than
+ * the ~20-minute spread measured so far and still costs about one Carbone
+ * morning of requests, once.
+ */
+const HOT_WINDOW_MS = 45 * 60_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 
@@ -392,9 +405,14 @@ async function runWatch(
   }
 
   // Cancellation watches take a single look per tick; drop watches hold the
-  // invocation and poll hard. See DROP_WINDOW_MAX_MS.
+  // invocation and poll hard. See DROP_WINDOW_MAX_MS. A cancellation watch that
+  // knows roughly when the release lands polls hard near that moment and stays
+  // polite everywhere else — see HOT_WINDOW_MS.
   const windowMs = Date.parse(snipe.watch_until!) - Date.parse(snipe.watch_from!);
-  const isCancellationWatch = windowMs > DROP_WINDOW_MAX_MS;
+  const nearExpectedDrop =
+    snipe.expected_drop_at != null &&
+    Math.abs(Date.now() - Date.parse(snipe.expected_drop_at)) <= HOT_WINDOW_MS;
+  const isCancellationWatch = windowMs > DROP_WINDOW_MAX_MS && !nearExpectedDrop;
 
   const until = isCancellationWatch
     ? Date.now() // one pass, then release

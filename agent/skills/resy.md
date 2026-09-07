@@ -51,6 +51,14 @@ anything.
   across it and book the second tables appear. A guessed minute doesn't error,
   it just quietly loses, and he finds out the night he expected to be eating. A
   watch window can only be a few seconds late.
+- **A wide watch can still be fast at the right moment.** A window longer than
+  six hours polls once a minute — polite, but up to a minute late, which loses
+  a Saturday four-top at a place like Le Café Louis Vuitton. If past drops at
+  the venue (`recall_memories`) put the release at a rough time, pass it as
+  `expectedDropLocal` inside the window: the 45 minutes either side of it poll
+  every 3 seconds, the rest of the window stays once a minute. Wrong by an hour
+  costs latency, not the night — so prefer this over shrinking the window to
+  a guess.
 - When you arm a watch, say what it means in plain terms — "I'll be watching
   from 8:45 to 10:15 that morning and grab it the moment they're released" — not
   a drop time you don't actually have.

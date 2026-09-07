@@ -959,6 +959,14 @@ export type ResySnipeRow = {
   drop_at: string | null;
   watch_from: string | null;
   watch_until: string | null;
+  /**
+   * Where inside a WIDE watch the release is believed to land. Advisory only:
+   * near it the watch polls every few seconds instead of once a minute, away
+   * from it nothing changes. A wrong guess costs up to a minute of latency, not
+   * the watch — which is the whole reason it's a hint on the watch rather than
+   * a narrower window.
+   */
+  expected_drop_at: string | null;
   status: "armed" | "firing" | "booked" | "missed" | "failed" | "cancelled";
   fired_at: string | null;
   /** When a watch first saw inventory — the measurement, written once. */

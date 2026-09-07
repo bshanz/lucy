@@ -53,6 +53,9 @@ export default defineTool({
           s.watch_from && s.watch_until
             ? `${formatResyTime(s.watch_from)} until ${formatResyTime(s.watch_until)}`
             : null,
+        // The moment inside a watch where she polls every few seconds rather
+        // than once a minute. Null means flat cadence across the whole window.
+        pollingHardestAround: s.expected_drop_at ? formatResyTime(s.expected_drop_at) : null,
         status: s.status,
         // Only present once it has fired. Quote these rather than paraphrasing —
         // "you got 7:45 in the dining room" is the whole point of the feature.
