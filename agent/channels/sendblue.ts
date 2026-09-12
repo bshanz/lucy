@@ -122,7 +122,28 @@ const IDLE_BEFORE_ROTATE_MS = 2 * 3600 * 1000;
  */
 const MAX_STALE_CODE_AGE_MS = 3 * 24 * 3600 * 1000;
 
-type SessionWindow = { epoch: number; startedAt: string; lastActivityAt: string };
+/**
+ * Bump this when a framework upgrade makes runs written by the previous
+ * runtime unreadable. A window stamped with an older generation rotates on the
+ * next text no matter how young or live it is — there is no conversation to
+ * protect inside a run the runtime cannot open.
+ *
+ * Learned on 2026-09-12, moving eve 0.27 → 0.51: the owner's session was 21
+ * days old but he had texted an hour earlier, so the idle guard held, the
+ * poller dispatched "hello" into the old run, and the new runtime failed it
+ * with "Event id is not slot-numbered" — retrying forever, replying never.
+ * The fix that day was a manual epoch bump in channel_state; this is that
+ * bump as code.
+ */
+export const SESSION_GENERATION = 2;
+
+type SessionWindow = {
+  epoch: number;
+  startedAt: string;
+  lastActivityAt: string;
+  /** Runtime generation that wrote this window; absent means pre-2026-09-12. */
+  generation?: number;
+};
 
 const sessionKey = (phone: string) => `sendblue:session:${phone}`;
 
@@ -132,7 +153,13 @@ function tokenFor(phone: string, epoch: number): string {
 
 async function writeWindow(phone: string, window: SessionWindow): Promise<void> {
   await supabase.from("channel_state").upsert(
-    [{ key: sessionKey(phone), value: window, updated_at: new Date().toISOString() }],
+    [
+      {
+        key: sessionKey(phone),
+        value: { ...window, generation: SESSION_GENERATION },
+        updated_at: new Date().toISOString(),
+      },
+    ],
     { onConflict: "key" },
   );
 }
@@ -173,6 +200,20 @@ export async function sessionToken(phone: string, opts?: { rotate?: boolean }): 
       return phone;
     }
     if (!rotate) return tokenFor(phone, window.epoch);
+
+    // Written by a runtime whose runs this one cannot resume: rotate now, ahead
+    // of every other guard. Idle and pending-approval checks protect a live
+    // conversation, and there is none inside an unreadable run.
+    const generation = window.generation ?? 1;
+    if (generation !== SESSION_GENERATION) {
+      const epoch = window.epoch + 1;
+      await writeWindow(phone, { epoch, startedAt: nowIso, lastActivityAt: nowIso });
+      console.log(
+        `[sendblue] rotated conversation window → epoch ${epoch} ` +
+          `(runtime generation ${generation} → ${SESSION_GENERATION})`,
+      );
+      return tokenFor(phone, epoch);
+    }
 
     const age = now - Date.parse(window.startedAt);
     const idle = now - Date.parse(window.lastActivityAt);

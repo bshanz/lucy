@@ -7,7 +7,7 @@
  * pending approval is stranded with no way to answer it. Uses a throwaway phone
  * number against the real channel_state table and cleans up after itself.
  */
-import { sessionToken } from "#channels/sendblue.js";
+import { SESSION_GENERATION, sessionToken } from "#channels/sendblue.js";
 import { supabase } from "#lib/supabase.js";
 
 const PHONE = "+15550000199"; // never a real Sendblue line
@@ -24,7 +24,12 @@ function check(name: string, got: string, want: string) {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name} → ${got}${ok ? "" : ` (wanted ${want})`}`);
 }
 
-async function setWindow(epoch: number, ageMs: number, idleMs: number) {
+async function setWindow(
+  epoch: number,
+  ageMs: number,
+  idleMs: number,
+  generation: number = SESSION_GENERATION,
+) {
   const now = Date.now();
   await supabase.from("channel_state").upsert(
     [{
@@ -33,6 +38,7 @@ async function setWindow(epoch: number, ageMs: number, idleMs: number) {
         epoch,
         startedAt: new Date(now - ageMs).toISOString(),
         lastActivityAt: new Date(now - idleMs).toISOString(),
+        generation,
       },
       updated_at: new Date().toISOString(),
     }],
@@ -86,6 +92,22 @@ await supabase.from("channel_state").delete().eq("key", pendingKey);
 await setWindow(1, 45 * DAY, 6 * HOUR);
 check("rotate:false on a due window", await sessionToken(PHONE, { rotate: false }), `${PHONE}#1`);
 check("...and it did not rotate", await sessionToken(PHONE, { rotate: false }), `${PHONE}#1`);
+
+// 8. A run the current runtime cannot resume is not a conversation worth
+//    protecting: an older generation rotates at once, young and live or not,
+//    and even past a pending approval (it could never be answered anyway).
+await setWindow(1, 1 * DAY, 10 * 60 * 1000, SESSION_GENERATION - 1);
+await supabase.from("channel_state").upsert(
+  [{
+    key: pendingKey,
+    value: { requests: [{ requestId: "req_2", options: [{ id: "approve", label: "Approve" }] }] },
+    updated_at: new Date().toISOString(),
+  }],
+  { onConflict: "key" },
+);
+check("older runtime generation, young, live, approval pending", await sessionToken(PHONE), `${PHONE}#2`);
+await supabase.from("channel_state").delete().eq("key", pendingKey);
+check("...and the new window is current", await sessionToken(PHONE), `${PHONE}#2`);
 
 await reset();
 console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} FAILED`);
