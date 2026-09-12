@@ -21,7 +21,7 @@ export default defineEval({
   description: "A question about his own booking goes to his records, never to search_flights.",
   tags: ["flights"],
   async test(t) {
-    const turn = await t.send(asOwnerMessage("what time is my flight on Thursday?"));
+    const turn = await t.send(...asOwnerMessage("what time is my flight on Thursday?"));
 
     t.succeeded();
 

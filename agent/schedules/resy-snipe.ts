@@ -57,7 +57,7 @@ import { supabase } from "#lib/supabase.js";
  * `curl -X POST http://localhost:3000/eve/v1/dev/schedules/resy-snipe`.
  */
 
-type Receive = ScheduleHandlerArgs["receive"];
+type To = ScheduleHandlerArgs["to"];
 
 /** How far ahead to claim. Must exceed the 60s cron granularity or drops slip through. */
 const LOOKAHEAD_MS = 90_000;
@@ -117,22 +117,18 @@ const HOT_WINDOW_MS = 45 * 60_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 
 async function dispatch(
-  receive: Receive,
+  to: To,
   appAuth: ScheduleHandlerArgs["appAuth"],
   snipe: Pick<ResySnipeRow, "channel" | "phone" | "slack_target">,
   message: string,
 ): Promise<void> {
   if (snipe.channel === "slack" && snipe.slack_target?.channelId) {
-    await receive(slack, {
-      message,
-      target: { channelId: snipe.slack_target.channelId },
-      auth: appAuth,
-    });
+    await to(slack, { channelId: snipe.slack_target.channelId }).send(message, { auth: appAuth });
     return;
   }
   const phone = snipe.phone ?? process.env.OWNER_PHONE;
   if (!phone) throw new Error("no delivery target (OWNER_PHONE missing)");
-  await receive(sendblue, { message, target: { phone }, auth: appAuth });
+  await to(sendblue, { phone }).send(message, { auth: appAuth });
 }
 
 type RaceOutcome =
@@ -356,7 +352,7 @@ async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
 /** Pre-warm, hold to the deadline, race, then write the outcome. */
 async function runSnipe(
   snipe: ResySnipeRow,
-  receive: Receive,
+  to: To,
   appAuth: ScheduleHandlerArgs["appAuth"],
 ): Promise<void> {
   const dropAt = Date.parse(snipe.drop_at!);
@@ -366,7 +362,7 @@ async function runSnipe(
     await Promise.all([resyApiKey(), getAuthToken(true)]);
   } catch (err) {
     const reason = err instanceof ResyError ? err.message : redact(String(err));
-    await finish(snipe, { kind: "failed", reason, attempts: 0 }, receive, appAuth);
+    await finish(snipe, { kind: "failed", reason, attempts: 0 }, to, appAuth);
     return;
   }
 
@@ -375,7 +371,7 @@ async function runSnipe(
   await sleep(dropAt - RACE_LEAD_MS - Date.now());
 
   const outcome = await race(snipe);
-  await finish(snipe, outcome, receive, appAuth);
+  await finish(snipe, outcome, to, appAuth);
 }
 
 /**
@@ -393,14 +389,14 @@ async function runSnipe(
  */
 async function runWatch(
   snipe: ResySnipeRow,
-  receive: Receive,
+  to: To,
   appAuth: ScheduleHandlerArgs["appAuth"],
 ): Promise<void> {
   try {
     await Promise.all([resyApiKey(), getAuthToken(true)]);
   } catch (err) {
     const reason = err instanceof ResyError ? err.message : redact(String(err));
-    await finish(snipe, { kind: "failed", reason, attempts: 0 }, receive, appAuth);
+    await finish(snipe, { kind: "failed", reason, attempts: 0 }, to, appAuth);
     return;
   }
 
@@ -438,7 +434,7 @@ async function runWatch(
         });
       } catch (err) {
         if (err instanceof ResyError && (err.kind === "auth" || err.kind === "not_configured")) {
-          await finish(snipe, { kind: "failed", reason: err.message, attempts: 0 }, receive, appAuth);
+          await finish(snipe, { kind: "failed", reason: err.message, attempts: 0 }, to, appAuth);
           return;
         }
         // Transport noise mid-drop is expected; keep watching.
@@ -457,7 +453,7 @@ async function runWatch(
       // Hand to the same race the precise path uses — it re-fetches, ranks, and
       // walks candidates identically.
       const outcome = await race(snipe);
-      await finish({ ...snipe, detected_at: detectedAt }, outcome, receive, appAuth);
+      await finish({ ...snipe, detected_at: detectedAt }, outcome, to, appAuth);
       return;
     }
     if (isCancellationWatch) break;
@@ -485,7 +481,7 @@ async function runWatch(
 async function finish(
   snipe: ResySnipeRow,
   outcome: RaceOutcome,
-  receive: Receive,
+  to: To,
   appAuth: ScheduleHandlerArgs["appAuth"],
 ): Promise<void> {
   const now = new Date().toISOString();
@@ -571,7 +567,7 @@ async function finish(
         `was booked.` + measured;
 
   try {
-    await dispatch(receive, appAuth, snipe, prompt);
+    await dispatch(to, appAuth, snipe, prompt);
   } catch (err) {
     console.error("[resy-snipe] outcome dispatch failed", err);
   }
@@ -579,7 +575,7 @@ async function finish(
 
 export default defineSchedule({
   cron: "* * * * *",
-  async run({ receive, appAuth, waitUntil }) {
+  async run({ to, appAuth, waitUntil }) {
     if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SECRET_KEY) return;
     // NOT gated on RESY_EMAIL/RESY_PASSWORD: most Resy accounts are OTP-only and
     // never have a password, so an env check here would silently disable every
@@ -616,7 +612,7 @@ export default defineSchedule({
     for (const s of lapsed ?? []) {
       try {
         await dispatch(
-          receive,
+          to,
           appAuth,
           s,
           `A reservation watch just ended without anything opening: ${s.venue_name} on ` +
@@ -668,8 +664,8 @@ export default defineSchedule({
     // independent races, and making one wait for the other loses the second.
     // Each settles on its own — one failure must not strand another's booking.
     const work = Promise.allSettled([
-      ...due.map((s) => runSnipe(s, receive, appAuth)),
-      ...watching.map((s) => runWatch(s, receive, appAuth)),
+      ...due.map((s) => runSnipe(s, to, appAuth)),
+      ...watching.map((s) => runWatch(s, to, appAuth)),
     ]);
     waitUntil(work);
     await work;

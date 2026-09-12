@@ -29,7 +29,7 @@ import { primeOwnerTimezone } from "#lib/reminders.js";
 const PASSES = 6; // t = 0s..50s — the t=50s pass may overlap the next tick, but the claim dedupes
 const PASS_INTERVAL_MS = 10_000;
 
-async function pollOnce(receive: ScheduleHandlerArgs["receive"], owner: string): Promise<void> {
+async function pollOnce(to: ScheduleHandlerArgs["to"], owner: string): Promise<void> {
   const inbound = await fetchRecentInbound(25);
 
   // Only the owner, only recent (poll window safety net), oldest first.
@@ -78,11 +78,7 @@ async function pollOnce(receive: ScheduleHandlerArgs["receive"], owner: string):
       // can't fetch or can't read degrades to a note Lucy reads out loud, which
       // keeps a broken URL from costing the turn instead of just the picture.
       const message = await buildTurnMessage(fresh[i]);
-      await receive(sendblue, {
-        message,
-        target: { phone: owner },
-        auth: sendblueAuth(owner),
-      });
+      await to(sendblue, { phone: owner }).send(message, { auth: sendblueAuth(owner) });
     } catch (err) {
       // Un-claim this message and everything after it so a later pass retries
       // in order; what already dispatched stays claimed.
@@ -97,7 +93,7 @@ async function pollOnce(receive: ScheduleHandlerArgs["receive"], owner: string):
 
 export default defineSchedule({
   cron: "* * * * *",
-  async run({ receive }) {
+  async run({ to }) {
     const owner = process.env.OWNER_PHONE;
     if (!owner || !process.env.SENDBLUE_API_KEY_ID || !process.env.SUPABASE_SECRET_KEY) {
       console.warn("[sendblue-poll] OWNER_PHONE / Sendblue / Supabase env not set; skipping");
@@ -108,7 +104,7 @@ export default defineSchedule({
 
     for (let pass = 0; pass < PASSES; pass++) {
       try {
-        await pollOnce(receive, owner);
+        await pollOnce(to, owner);
       } catch (err) {
         // One bad pass (transient API error) shouldn't kill the whole minute.
         console.error(`[sendblue-poll] pass ${pass} failed`, err);

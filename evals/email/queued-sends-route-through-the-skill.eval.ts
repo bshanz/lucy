@@ -36,7 +36,7 @@ export default defineEval({
     // thing under test. Nothing can leave regardless: both send tools are
     // approval-gated, and this run never approves.
     const turn = await t.send(
-      asOwnerMessage(
+      ...asOwnerMessage(
         "can you email frontdesk@clearwaterpools.com tomorrow at 9am and let them know " +
           "we'll be away all next week so they should skip the Tuesday service",
       ),

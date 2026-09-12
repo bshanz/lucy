@@ -14,8 +14,8 @@ import { ownerTimeContext } from "#lib/reminders.js";
  * it — the flights evals ask about "Thursday" and are meaningless without a
  * clock, exactly like the moments evals asking about "last night".
  */
-export function asOwnerMessage(text: string): { message: string; clientContext: string[] } {
-  return { message: text, clientContext: ownerTimeContext() };
+export function asOwnerMessage(text: string): readonly [string, { clientContext: string[] }] {
+  return [text, { clientContext: ownerTimeContext() }] as const;
 }
 
 /** The shape we need off an eval-observed tool call; matches `EveEvalToolCall`. */

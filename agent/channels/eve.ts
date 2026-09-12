@@ -7,7 +7,10 @@ import { localDev, placeholderAuth, vercelOidc } from "eve/channels/auth";
  * Lucy's real surfaces are the sendblue and slack channels, which do their
  * own sender verification. This channel only needs to work for local dev and
  * internal Vercel callers; placeholderAuth keeps production browser traffic
- * behind a clear 401.
+ * behind a clear 401. Same order as eve's own default: localDev() grants the
+ * synthetic principal only inside an `eve dev` / `vercel dev` process (since
+ * eve 0.30 it no longer looks at the request Host), so it is safe anywhere in
+ * the walk.
  *
  * LUCY_AGENT_SECRET gates the sendblue webhook + gmail authorize routes. If
  * it's missing in production those routes would be unreachable (or worse,
@@ -20,5 +23,5 @@ if (process.env.VERCEL_ENV === "production" && !process.env.LUCY_AGENT_SECRET) {
 }
 
 export default eveChannel({
-  auth: [localDev(), vercelOidc(), placeholderAuth()],
+  auth: [vercelOidc(), localDev(), placeholderAuth()],
 });

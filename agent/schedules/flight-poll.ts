@@ -60,28 +60,24 @@ const WATCH_COLUMNS =
   "target_price, baseline_price, last_price, last_price_at, alerted_price, alerted_at, " +
   "checked_on, last_checked_at, last_error, consecutive_errors, status, paused_reason, created_at";
 
-type Receive = ScheduleHandlerArgs["receive"];
+type To = ScheduleHandlerArgs["to"];
 
 /** Deliver a prompt to whichever surface the watch was created from. */
 async function dispatch(
-  receive: Receive,
+  to: To,
   appAuth: ScheduleHandlerArgs["appAuth"],
   watch: Pick<FlightWatchRow, "channel" | "phone" | "slack_target">,
   message: string,
 ): Promise<void> {
   if (watch.channel === "slack" && watch.slack_target?.channelId) {
-    await receive(slack, {
-      message,
-      target: { channelId: watch.slack_target.channelId },
-      auth: appAuth,
-    });
+    await to(slack, { channelId: watch.slack_target.channelId }).send(message, { auth: appAuth });
     return;
   }
   // Fall back to OWNER_PHONE rather than dropping it (unlike reminder-poll):
   // a price alert is worth delivering on the wrong surface.
   const phone = watch.phone ?? process.env.OWNER_PHONE;
   if (!phone) throw new Error("no delivery target (OWNER_PHONE missing)");
-  await receive(sendblue, { message, target: { phone }, auth: appAuth });
+  await to(sendblue, { phone }).send(message, { auth: appAuth });
 }
 
 async function releaseClaims(ids: string[]): Promise<void> {
@@ -95,7 +91,7 @@ async function releaseClaims(ids: string[]): Promise<void> {
  * extra table and no extra cron. The winning upsert is the claim.
  */
 async function notifyQuotaOnce(
-  receive: Receive,
+  to: To,
   appAuth: ScheduleHandlerArgs["appAuth"],
   renewalDate: string,
 ): Promise<void> {
@@ -111,20 +107,18 @@ async function notifyQuotaOnce(
 
   const phone = process.env.OWNER_PHONE;
   if (!phone) return;
-  await receive(sendblue, {
-    message:
-      "Your flight price checks have run out for this billing cycle" +
+  await to(sendblue, { phone }).send(
+    "Your flight price checks have run out for this billing cycle" +
       (renewalDate ? `, and reset on ${renewalDate}` : "") +
       ". Flight watches are paused until then. Tell the owner in one short sentence, and offer " +
       "to cancel a watch or two if he wants the next cycle to stretch further.",
-    target: { phone },
-    auth: appAuth,
-  });
+    { auth: appAuth },
+  );
 }
 
 export default defineSchedule({
   cron: "0 * * * *",
-  async run({ receive, appAuth }) {
+  async run({ to, appAuth }) {
     if (
       !process.env.SERPAPI_API_KEY ||
       !process.env.SUPABASE_URL ||
@@ -167,7 +161,7 @@ export default defineSchedule({
       });
       try {
         await dispatch(
-          receive,
+          to,
           appAuth,
           expired[0] as Pick<FlightWatchRow, "channel" | "phone" | "slack_target">,
           `These flight watches just aged out because departure is nearly here, and you've stopped ` +
@@ -207,7 +201,7 @@ export default defineSchedule({
           `[flight-poll] only ${quota.totalSearchesLeft} searches left; reserving them for questions`,
         );
         await releaseClaims(due.map((w) => w.id));
-        await notifyQuotaOnce(receive, appAuth, quota.planRenewalDate);
+        await notifyQuotaOnce(to, appAuth, quota.planRenewalDate);
         return;
       }
       const budget = quota.totalSearchesLeft - QUOTA_RESERVE;
@@ -247,7 +241,7 @@ export default defineSchedule({
         if (err instanceof FlightSearchError && err.kind === "quota") {
           // Global, not per-watch: stop the run and give back what we haven't spent.
           await releaseClaims(toCheck.slice(i).map((x) => x.id));
-          await notifyQuotaOnce(receive, appAuth, quota?.planRenewalDate ?? "");
+          await notifyQuotaOnce(to, appAuth, quota?.planRenewalDate ?? "");
           console.warn("[flight-poll] quota exhausted mid-run; stopping");
           break;
         }
@@ -378,7 +372,7 @@ export default defineSchedule({
         `do not state any price, airline or time that isn't listed here. If he says to stop ` +
         `watching one, cancel it with cancel_flight_watch using the watch id given.`;
       try {
-        await dispatch(receive, appAuth, alerts[0].watch, prompt);
+        await dispatch(to, appAuth, alerts[0].watch, prompt);
       } catch (err) {
         console.error("[flight-poll] alert dispatch failed", err);
         // Revert only the alert claim — the observed price stands — so the next

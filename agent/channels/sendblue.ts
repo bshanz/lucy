@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { UserContent } from "ai";
 import { startAuthorization } from "@vercel/connect";
 import { defineChannel, GET, POST } from "eve/channels";
+import { parseInputResponses } from "eve/client";
 import type { SessionAuthContext } from "eve/context";
 import { isRunningStaleCode, recordPinnedDeployment } from "#lib/deployment.js";
 import { gmailConnectorUid, OWNER_SUBJECT, ownerEmailAddress } from "#lib/gmail.js";
@@ -17,7 +18,7 @@ import { supabase } from "#lib/supabase.js";
  * Ingress today is the polling schedule (agent/schedules/sendblue-poll.ts) —
  * the free sandbox has no webhooks. The webhook route below is dormant until
  * the owner upgrades to a plan with webhook support; register it then with:
- *   sendblue webhooks add https://<app>/eve/v1/sendblue/webhook?secret=<LUCY_AGENT_SECRET> --type receive
+ *   sendblue webhooks add https://<app>/sendblue/webhook?secret=<LUCY_AGENT_SECRET> --type receive
  *
  * Sessions are windowed per phone number (see sessionToken): a single forever
  * session would re-send an ever-growing compacted context on every text, and
@@ -49,11 +50,14 @@ function secretMatches(candidate: string | null): boolean {
 
 /**
  * Pending HITL requests, persisted in channel_state so ingress can translate
- * an "approve"-style text into a structured inputResponse. eve's own text
- * matcher compares the WHOLE coalesced message against the options, so once
- * any unrelated text is queued behind a pending approval, no plain-text reply
- * can ever match again — structured responses bypass the text matcher and
- * resolve even with held text queued.
+ * an "approve"-style text into a structured input response. eve's own text
+ * matcher only fires when the WHOLE message equals an option id, label, or
+ * index, and the poller coalesces adjacent texts into one message — so "yes"
+ * typed after an unrelated text never matches on its own. A structured
+ * `respond()` bypasses the matcher and resolves the request regardless. (Since
+ * eve 0.54 unrelated text no longer parks behind a pending approval; it runs
+ * as a normal turn while the approval stays open, so this store is about
+ * resolving reliably, not about unblocking held text.)
  */
 type PendingOption = { id: string; label: string };
 type PendingRequest = { requestId: string; options: PendingOption[] };
@@ -144,8 +148,9 @@ async function hasPendingRequests(phone: string): Promise<boolean> {
 }
 
 /**
- * The continuation token for this phone's current conversation window, marking
- * activity as a side effect. Pass `{ rotate: false }` for read-only lookups
+ * The channel-local session ADDRESS for this phone's current conversation
+ * window (what `from()` and `resolveSession()` take), marking activity as a
+ * side effect. Pass `{ rotate: false }` for read-only lookups
  * (the resolve-input repair path) so inspecting a session can never move it.
  *
  * Never throws: if the state store is unreachable we fall back to the bare
@@ -204,7 +209,7 @@ export async function sessionToken(phone: string, opts?: { rotate?: boolean }): 
     await writeWindow(phone, { ...window, lastActivityAt: nowIso });
     return tokenFor(phone, window.epoch);
   } catch (err) {
-    console.warn("[sendblue] session window lookup failed; using bare phone token", err);
+    console.warn("[sendblue] session window lookup failed; using bare phone address", err);
     return phone;
   }
 }
@@ -227,13 +232,14 @@ function matchOption(text: string, options: PendingOption[]): string | undefined
 /**
  * Maps the repair route's approve/deny intent onto a request's OWN option ids.
  * Confirmation kinds don't share an id vocabulary — tool approvals use
- * approve/deny, the session-limit continuation uses continue/stop — and eve
- * drops a response whose optionId isn't one of that request's options, so
- * sending the literal "approve" silently failed to resolve a limit prompt.
+ * approve/cancel (approve/deny before eve 0.32), the session-limit
+ * continuation uses continue/stop — and eve drops a response whose optionId
+ * isn't one of that request's options, so sending the literal "approve"
+ * silently failed to resolve a limit prompt.
  */
 const INTENT_SYNONYMS = {
   approve: ["approve", "continue", "allow", "yes"],
-  deny: ["deny", "stop", "reject", "no"],
+  deny: ["cancel", "deny", "stop", "reject", "no"],
 } as const;
 
 function resolveIntent(intent: "approve" | "deny", options: PendingOption[]): string | undefined {
@@ -269,6 +275,13 @@ async function matchPendingResponses(
 export default defineChannel<SendblueState, { state: SendblueState; reply: (text: string) => Promise<void> }, SendblueReceiveTarget>({
   state: { phone: "" },
 
+  // eve 0.33 made "steer" the default: a new message cancels the turn in
+  // flight. Lucy's ingress is sequential and already coalesces adjacent texts,
+  // and a cancelled turn mid-tool-call (a booking, an email send) is exactly
+  // the kind of half-done work the claim-before-dispatch design exists to
+  // prevent. Queue, as before.
+  turnPolicy: "queue",
+
   metadata: (state) => ({ channel: "sendblue", phone: state.phone }),
 
   context: (state) => ({
@@ -280,8 +293,8 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
     // Mint a Gmail consent URL FROM the deployed environment. Connect buckets
     // grants by the caller's environment, so the production grant must be
     // created by production — a laptop-created grant is invisible here.
-    //   curl -H "Authorization: Bearer $LUCY_AGENT_SECRET" https://<app>/eve/v1/gmail/authorize
-    GET("/eve/v1/gmail/authorize", async (req) => {
+    //   curl -H "Authorization: Bearer $LUCY_AGENT_SECRET" https://<app>/gmail/authorize
+    GET("/gmail/authorize", async (req) => {
       const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null;
       if (!secretMatches(bearer)) return new Response("Unauthorized", { status: 401 });
       const auth = await startAuthorization(gmailConnectorUid(), {
@@ -297,10 +310,10 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
     // Escape hatch: answer the owner session's most recent pending HITL
     // requests with one option, reading requestIds off the durable event
     // stream. Needed when an approval predates the pending-input store (or the
-    // store row is lost) and held text has made text replies unmatchable.
+    // store row is lost) and a text reply cannot be made to match.
     //   curl -X POST -H "Authorization: Bearer $LUCY_AGENT_SECRET" \
-    //     "https://<app>/eve/v1/sendblue/resolve-input?option=approve"
-    POST("/eve/v1/sendblue/resolve-input", async (req, { send, resolveActiveSession, getSession }) => {
+    //     "https://<app>/sendblue/resolve-input?option=approve"
+    POST("/sendblue/resolve-input", async (req, { from, resolveSession }) => {
       const url = new URL(req.url);
       const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null;
       if (!secretMatches(bearer)) return new Response("Unauthorized", { status: 401 });
@@ -313,9 +326,11 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
 
       // rotate:false — this is the repair path; inspecting must not move the window.
       const repairToken = await sessionToken(phone, { rotate: false });
-      const active = await resolveActiveSession({ continuationToken: repairToken });
-      if (!active) return Response.json({ error: "no active session" }, { status: 404 });
-      const session = getSession(active.sessionId);
+      // Snapshot the address's current owner as a fixed handle: only the fixed
+      // Session exposes the event stream, and the walk below must not follow a
+      // replacement session mid-read.
+      const session = await resolveSession(repairToken);
+      if (!session) return Response.json({ error: "no active session" }, { status: 404 });
 
       const tail = await session.getStreamTailIndex();
       if (tail < 0) return Response.json({ error: "empty event stream" }, { status: 404 });
@@ -348,16 +363,18 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
           { status: 409 },
         );
       }
-      await send(
-        { inputResponses: responses },
-        { auth: sendblueAuth(phone), continuationToken: repairToken, state: { phone } },
-      );
+      // parseInputResponses: respond() takes exact literals or values proven by
+      // eve's strict schema; these were assembled from decoded stream data.
+      await from(repairToken).respond(parseInputResponses(responses), {
+        auth: sendblueAuth(phone),
+        state: { phone },
+      });
       await clearPendingRequests(phone).catch(() => {});
       return Response.json({ resolved: responses });
     }),
 
     // Dormant until a webhook-capable Sendblue plan; the poller is ingress today.
-    POST("/eve/v1/sendblue/webhook", async (req, { send, waitUntil }) => {
+    POST("/sendblue/webhook", async (req, { from, waitUntil }) => {
       const url = new URL(req.url);
       const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null;
       if (!secretMatches(url.searchParams.get("secret")) && !secretMatches(bearer)) {
@@ -408,11 +425,8 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
           // Load any travel override before the clock is read; see primeOwnerTimezone.
           await primeOwnerTimezone();
           const context = ownerTimeContext();
-          const options = {
-            auth: sendblueAuth(phone),
-            continuationToken: await sessionToken(phone),
-            state: { phone },
-          };
+          const auth = sendblueAuth(phone);
+          const source = from(await sessionToken(phone));
           // Same builder as the poller, so the two ingress paths can never
           // disagree about what an inbound image turns into.
           const message = await buildTurnMessage(body);
@@ -421,10 +435,10 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
               ? await matchPendingResponses(phone, message).catch(() => [])
               : [];
           if (responses.length > 0) {
-            await send({ inputResponses: responses, context }, options);
+            await source.respond(parseInputResponses(responses), { auth, context, state: { phone } });
             await clearPendingRequests(phone).catch(() => {});
           } else {
-            await send({ message, context }, options);
+            await source.send(message, { auth, context, state: { phone } });
           }
         })(),
       );
@@ -432,32 +446,30 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
     }),
   ],
 
-  // Used by the sendblue-poll and reminder-poll schedules.
-  async receive(input, { send }) {
+  // Used by every schedule via `to(sendblue, { phone }).send(...)`. This hook
+  // owns the address format: schedule-initiated messages (reminders, flight
+  // alerts) land in the same window as the owner's texts and count as
+  // activity like any other turn.
+  async receive(input, { from }) {
     const phone = input.target.phone;
     await primeOwnerTimezone();
     const context = ownerTimeContext();
-    const options = {
-      auth: input.auth ?? sendblueAuth(phone),
-      // Schedule-initiated messages (reminders, flight alerts) land in the same
-      // window as the owner's texts, and count as activity like any other turn.
-      continuationToken: await sessionToken(phone),
-      state: { phone },
-    };
-    // eve types the authored receive hook's input as `message: string`, but the
-    // caller side (CrossChannelReceiveOptions) is `string | UserContent` and the
-    // runtime forwards either verbatim. The poller hands us an array of parts
-    // when the owner texted an image, so widen it here rather than lie about it.
-    const message = input.message as string | UserContent;
+    const auth = input.auth ?? sendblueAuth(phone);
+    const source = from(await sessionToken(phone));
+    const message: string | UserContent = input.message;
     if (typeof message === "string") {
       const responses = await matchPendingResponses(phone, message).catch(() => []);
       if (responses.length > 0) {
-        const session = await send({ inputResponses: responses, context }, options);
+        const session = await source.respond(parseInputResponses(responses), {
+          auth,
+          context,
+          state: { phone },
+        });
         await clearPendingRequests(phone).catch(() => {});
         return session;
       }
     }
-    return send({ message, context }, options);
+    return source.send(message, { auth, context, state: { phone } });
   },
 
   events: {
@@ -476,9 +488,9 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       await sendTypingIndicator(channel.state.phone).catch(() => {});
     },
     // iMessage has no buttons, so HITL prompts must go out as plain text.
-    // eve resolves a reply that matches an option id, label, or 1-based index,
-    // and holds unrelated messages until the request is answered — without this
-    // handler the session parks silently and Lucy goes dark.
+    // eve resolves a reply that matches an option id, label, or 1-based index;
+    // until one arrives the request stays pending (a session-limit prompt
+    // parks the turn) — without this handler Lucy asks nothing and goes dark.
     async "input.requested"(data, channel) {
       // Persist before texting so a fast reply can't race the store.
       const optionRequests = data.requests
@@ -495,7 +507,7 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       for (const request of data.requests) {
         const lines: string[] = [];
         const options = request.options ?? [];
-        if (request.display === "confirmation") {
+        if (request.kind === "tool-approval" || request.kind === "session-limit") {
           // eve writes a prompt per confirmation kind — "Approve tool call: X"
           // for tool approvals, a paragraph explaining the guardrail for the
           // session-limit continuation. Rendering toolName instead turned that
@@ -511,8 +523,8 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
           lines.push(request.prompt);
         }
         // Always list the request's own options rather than hardcoding
-        // approve/deny: ids and labels vary by kind (approve/deny → Yes/No for
-        // tools, continue/stop → Approve/Stop for the session limit), and
+        // approve/cancel: ids and labels vary by kind (approve/cancel → Yes/No
+        // for tools, continue/stop → Approve/Stop for the session limit), and
         // matchOption only resolves an id, a label, or a 1-based index. The old
         // hardcoded 'reply "deny"' matched nothing on a session-limit prompt.
         options.forEach((option, index) => {

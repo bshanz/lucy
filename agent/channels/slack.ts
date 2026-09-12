@@ -51,6 +51,18 @@ export default slackChannel({
       context: ownerTimeContext(),
     };
   },
+
+  // eve-owned HITL buttons resume a parked session through this hook, NOT
+  // through the message hooks above — so without it anyone in the workspace
+  // who can see an approval card could press Approve. Same gate as ingress.
+  onInputResponse(ctx, submission) {
+    const ownerId = process.env.OWNER_SLACK_USER_ID;
+    if (!ownerId || submission.user.id !== ownerId) {
+      console.warn(`[slack] ignoring HITL response from non-owner ${submission.user.id}`);
+      return null;
+    }
+    return { auth: ctx.defaultAuth };
+  },
 });
 
 function withChannelAttr(

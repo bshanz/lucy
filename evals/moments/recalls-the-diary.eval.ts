@@ -14,7 +14,7 @@ export default defineEval({
   description: "A question about the past searches the diary instead of guessing.",
   tags: ["moments"],
   async test(t) {
-    const turn = await t.send(asOwnerMessage("how many times have I had ice cream this month?"));
+    const turn = await t.send(...asOwnerMessage("how many times have I had ice cream this month?"));
 
     t.succeeded();
     t.calledTool("recall_moments");

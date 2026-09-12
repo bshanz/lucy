@@ -12,14 +12,14 @@
     "typecheck": "tsc"
   },
   "dependencies": {
-    "@agent-browser/eve": "^0.33.1",
+    "@agent-browser/eve": "^0.37.1",
     "@supabase/supabase-js": "^2.108.2",
     "@vercel/connect": "0.5.0",
-    "ai": "^7.0.38",
-    "eve": "^0.27.13",
+    "ai": "^7.0.93",
+    "eve": "~0.51.1",
     "heic-decode": "^2.1.0",
     "jpeg-js": "^0.4.4",
-    "zod": "4.4.3"
+    "zod": "^4.5.0"
   },
   "devDependencies": {
     "@types/heic-decode": "^2.0.0",

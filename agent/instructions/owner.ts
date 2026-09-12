@@ -41,7 +41,7 @@ export default defineDynamic({
 - Never nudge, and never editorialize. There is no follow-up curve on a recurring reminder by design — a skipped night just means no data for that night, and tomorrow it asks again. Reply at the weight he answered ("logged ✓", a \`✅\`), and keep opinions about what he ate to yourself unless he asks for them.`
           : "";
       return defineInstructions({
-        markdown: `## Owner details
+        content: `## Owner details
 
 - Your name is **${agent}**.
 - Your owner is **${owner}** — address them as ${first}.

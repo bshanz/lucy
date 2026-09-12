@@ -25,7 +25,7 @@ export default defineEval({
   async test(t) {
     try {
       const turn = await t.send(
-        asOwnerMessage(
+        ...asOwnerMessage(
           "can you just look up flights from New York to Lisbon on Google Flights for me — Oct 6 out, Oct 13 back",
         ),
       );

@@ -23,7 +23,7 @@ export default defineEval({
   description: "A flight-status question gets an honest 'no live feed', not a browse.",
   tags: ["flights"],
   async test(t) {
-    const turn = await t.send(asOwnerMessage("is my flight delayed?"));
+    const turn = await t.send(...asOwnerMessage("is my flight delayed?"));
 
     t.succeeded();
 
