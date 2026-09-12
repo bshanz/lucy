@@ -25,8 +25,7 @@ export default defineEval({
   description: "An RSVP question loads the calendar-guests skill and changes nothing.",
   tags: ["calendar"],
   async test(t) {
-    const turn = await t.send(
-      asOwnerMessage("did anyone accept my calendar invites for this week?"),
+    const turn = await t.send(...asOwnerMessage("did anyone accept my calendar invites for this week?"),
     );
 
     t.succeeded();

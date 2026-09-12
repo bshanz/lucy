@@ -115,7 +115,7 @@ requirements - each one is a silent-failure mode someone already hit:
    the auth endpoint, the three scopes, User Authorization + Refresh Tokens
    ON), UID → GMAIL_CONNECTOR_UID. Mint BOTH grants: dev via
    scripts/authorize-gmail.mjs, production via the deployed
-   /eve/v1/gmail/authorize route - grants are bucketed per environment.
+   /gmail/authorize route - grants are bucketed per environment.
    I do all Google sign-ins myself.
 7. Slack (ask me if I want it): follow the README's connector steps,
    including the detach/attach trigger re-point to /eve/v1/slack.
@@ -145,6 +145,8 @@ git clone <this repo> && cd lucy
 pnpm install   # or npm install
 cp .env.example .env.local
 ```
+
+> **eve version:** pinned to `~0.51.1`, not latest. `@agent-browser/eve` (the browser tools) is compiled against eve's tool contract, and eve 0.52 dropped the contract range it was built with when the old delegated-task API was removed — on 0.52+ the extension mount is silently discarded and `eve build` fails with `Selected module binding "extensions/browser.ts" has no compile or runtime usage`. Move the pin forward once `@agent-browser/eve` ships a build that declares a contract ≥ 28 (check `requires.tool` in its `dist/extension/_manifest.json`).
 
 ### 2. Supabase
 
@@ -191,7 +193,7 @@ Add every var from `.env.local` to the Vercel project's production env (⚠️ u
 node --env-file=.env.local scripts/authorize-gmail.mjs
 
 # production grant (after first deploy - mint the URL FROM production):
-curl -H "Authorization: Bearer $LUCY_AGENT_SECRET" https://YOUR-APP.vercel.app/eve/v1/gmail/authorize
+curl -H "Authorization: Bearer $LUCY_AGENT_SECRET" https://YOUR-APP.vercel.app/gmail/authorize
 ```
 
 Open each URL, sign in as `OWNER_EMAIL`, done. The script verifies which mailbox the grant landed on.
@@ -240,7 +242,7 @@ Text your Sendblue number. The first cron tick picks it up; typing indicator app
 The webhook route ships dormant. On a webhook-capable plan:
 
 ```bash
-sendblue webhooks add "https://YOUR-APP.vercel.app/eve/v1/sendblue/webhook?secret=$LUCY_AGENT_SECRET" --type receive
+sendblue webhooks add "https://YOUR-APP.vercel.app/sendblue/webhook?secret=$LUCY_AGENT_SECRET" --type receive
 ```
 
 The webhook and the poller share the same dedupe table, so they safely coexist - keep the poller as a fallback.

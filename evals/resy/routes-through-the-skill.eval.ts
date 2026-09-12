@@ -27,8 +27,7 @@ export default defineEval({
   description: "A booking request loads the resy skill and arms nothing without a real date.",
   tags: ["resy"],
   async test(t) {
-    const turn = await t.send(
-      asOwnerMessage("can you get me into Carbone sometime next month? party of 2"),
+    const turn = await t.send(...asOwnerMessage("can you get me into Carbone sometime next month? party of 2"),
     );
 
     // NOT t.succeeded(). A dateless request should end in a question, and eve

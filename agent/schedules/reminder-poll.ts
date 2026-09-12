@@ -325,7 +325,7 @@ function followUpPrompt(reminder: ReminderRow, attempt: number): string {
 
 export default defineSchedule({
   cron: "* * * * *",
-  async run({ receive, appAuth }) {
+  async run({ to, appAuth }) {
     if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SECRET_KEY) {
       console.warn("[reminder-poll] Supabase env not set; skipping");
       return;
@@ -345,14 +345,12 @@ export default defineSchedule({
         // the effect on the next reminder either way.
         const phone = process.env.OWNER_PHONE;
         if (phone && isWakingHour()) {
-          await receive(sendblue, {
-            message:
-              `His trip to ${expired.from} is over, so you have switched back to his home timezone ` +
+          await to(sendblue, { phone }).send(
+            `His trip to ${expired.from} is over, so you have switched back to his home timezone ` +
               `(${expired.to}); ${expired.reanchored} repeating reminder(s) moved with him. Tell him ` +
               "in one short line, no questions.",
-            target: { phone },
-            auth: appAuth,
-          });
+            { auth: appAuth },
+          );
         }
       }
     } catch (err) {
@@ -390,17 +388,11 @@ export default defineSchedule({
         `Deliver it to him as a short, natural reminder message.`;
       try {
         if (reminder.channel === "slack" && reminder.slack_target?.channelId) {
-          await receive(slack, {
-            message: prompt,
-            target: { channelId: reminder.slack_target.channelId },
+          await to(slack, { channelId: reminder.slack_target.channelId }).send(prompt, {
             auth: appAuth,
           });
         } else if (reminder.phone) {
-          await receive(sendblue, {
-            message: prompt,
-            target: { phone: reminder.phone },
-            auth: appAuth,
-          });
+          await to(sendblue, { phone: reminder.phone }).send(prompt, { auth: appAuth });
         } else {
           console.error(`[reminder-poll] reminder ${reminder.id} has no valid target; cancelling`);
           await supabase.from("reminders").update({ status: "cancelled" }).eq("id", reminder.id);
@@ -408,7 +400,7 @@ export default defineSchedule({
         }
 
         // Dispatched, NOT delivered — and the difference is the whole point.
-        // receive() resolves the moment the session accepts the message; the
+        // send() resolves the moment the session accepts the message; the
         // text is composed and sent seconds later, or never at all if the
         // session is parked. confirmDeliveries() decides which happened, on a
         // later tick, from Sendblue's own record of what left.
@@ -453,17 +445,11 @@ export default defineSchedule({
       const prompt = followUpPrompt(reminder, attempt);
       try {
         if (reminder.channel === "slack" && reminder.slack_target?.channelId) {
-          await receive(slack, {
-            message: prompt,
-            target: { channelId: reminder.slack_target.channelId },
+          await to(slack, { channelId: reminder.slack_target.channelId }).send(prompt, {
             auth: appAuth,
           });
         } else if (reminder.phone) {
-          await receive(sendblue, {
-            message: prompt,
-            target: { phone: reminder.phone },
-            auth: appAuth,
-          });
+          await to(sendblue, { phone: reminder.phone }).send(prompt, { auth: appAuth });
         }
         // The curve does NOT move here. Handing a nudge to the session is not
         // asking him anything — confirmDeliveries advances the count only once

@@ -31,7 +31,7 @@ export default defineEval({
 
     try {
       const turn = await t.send(
-        asOwnerMessage(
+        ...asOwnerMessage(
           "from now on when I ask what my day looks like, lead with anything ferroniere-related first",
         ),
       );

@@ -42,7 +42,7 @@ export default defineEval({
       if (error) throw new Error(`seed failed: ${error.message}`);
       seededId = data.id as string;
 
-      const turn = await t.send(asOwnerMessage("how many alcoholic drinks have I had this month?"));
+      const turn = await t.send(...asOwnerMessage("how many alcoholic drinks have I had this month?"));
       calls = turn.toolCalls;
 
       t.succeeded();

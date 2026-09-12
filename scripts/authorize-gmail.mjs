@@ -14,7 +14,7 @@
 //
 // NOTE: grants are bucketed by the CALLER's environment. This script creates
 // a DEVELOPMENT grant (vercel env pull mints dev OIDC tokens). Production
-// needs its own grant via the deployed /eve/v1/gmail/authorize route.
+// needs its own grant via the deployed /gmail/authorize route.
 
 import { startAuthorization, getToken } from "@vercel/connect";
 

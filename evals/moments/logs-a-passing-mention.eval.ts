@@ -21,7 +21,7 @@ export default defineEval({
     let calls: readonly ObservedToolCall[] = [];
 
     try {
-      const turn = await t.send(asOwnerMessage("just had a scoop of pistachio at Morgenstern's, so good"));
+      const turn = await t.send(...asOwnerMessage("just had a scoop of pistachio at Morgenstern's, so good"));
       calls = turn.toolCalls;
 
       t.succeeded();

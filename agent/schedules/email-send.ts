@@ -9,8 +9,8 @@ import { STUCK_MS, supabase, type ScheduledEmailRow } from "#lib/scheduled-email
 /**
  * Sends the emails the owner already approved, at the moment he asked for.
  *
- * WHAT THIS DELIBERATELY DOES NOT DO IS THINK. There is no receive() on the send
- * path and no model in the loop: to_address, subject and body come out of the
+ * WHAT THIS DELIBERATELY DOES NOT DO IS THINK. Nothing is dispatched to the
+ * agent on the send path and no model is in the loop: to_address, subject and body come out of the
  * row exactly as they went in at approval time, through the same
  * buildNewEmailRaw() the interactive tool uses. That is the whole safety
  * argument for skipping the approval card here — not "a cron started this turn",
@@ -30,25 +30,21 @@ import { STUCK_MS, supabase, type ScheduledEmailRow } from "#lib/scheduled-email
  * `curl -X POST http://localhost:3000/eve/v1/dev/schedules/email-send`.
  */
 
-type Receive = ScheduleHandlerArgs["receive"];
+type To = ScheduleHandlerArgs["to"];
 
 async function dispatch(
-  receive: Receive,
+  to: To,
   appAuth: ScheduleHandlerArgs["appAuth"],
   row: Pick<ScheduledEmailRow, "channel" | "phone" | "slack_target">,
   message: string,
 ): Promise<void> {
   if (row.channel === "slack" && row.slack_target?.channelId) {
-    await receive(slack, {
-      message,
-      target: { channelId: row.slack_target.channelId },
-      auth: appAuth,
-    });
+    await to(slack, { channelId: row.slack_target.channelId }).send(message, { auth: appAuth });
     return;
   }
   const phone = row.phone ?? process.env.OWNER_PHONE;
   if (!phone) throw new Error("no delivery target (OWNER_PHONE missing)");
-  await receive(sendblue, { message, target: { phone }, auth: appAuth });
+  await to(sendblue, { phone }).send(message, { auth: appAuth });
 }
 
 const sentPrompt = (row: ScheduledEmailRow) =>
@@ -104,7 +100,7 @@ async function markFailed(
 
 export default defineSchedule({
   cron: "* * * * *",
-  async run({ receive, appAuth }) {
+  async run({ to, appAuth }) {
     if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SECRET_KEY) {
       console.warn("[email-send] Supabase env not set; skipping");
       return;
@@ -138,7 +134,7 @@ export default defineSchedule({
         console.warn(`[email-send] ${row.id} was interrupted but had already sent`);
         await markSent(row, row.attempts);
         try {
-          await dispatch(receive, appAuth, row, sentPrompt(row));
+          await dispatch(to, appAuth, row, sentPrompt(row));
         } catch (err) {
           console.error("[email-send] recovery notice failed", err);
         }
@@ -149,7 +145,7 @@ export default defineSchedule({
       // failure, and the message he gets has to say so.
       await markFailed(row, "interrupted mid-send; not found in Sent", row.attempts);
       try {
-        await dispatch(receive, appAuth, row, unknownPrompt(row));
+        await dispatch(to, appAuth, row, unknownPrompt(row));
       } catch (err) {
         console.error("[email-send] uncertainty notice failed", err);
       }
@@ -193,7 +189,7 @@ export default defineSchedule({
         if (!landed) {
           await markFailed(row, reason, attempts);
           try {
-            await dispatch(receive, appAuth, row, failedPrompt(row, reason));
+            await dispatch(to, appAuth, row, failedPrompt(row, reason));
           } catch (dispatchErr) {
             console.error("[email-send] failure notice failed", dispatchErr);
           }
@@ -204,7 +200,7 @@ export default defineSchedule({
 
       await markSent(row, attempts);
       try {
-        await dispatch(receive, appAuth, row, sentPrompt(row));
+        await dispatch(to, appAuth, row, sentPrompt(row));
       } catch (err) {
         // The email is out and recorded. A missing confirmation text is a
         // nuisance; re-sending the email to fix it would not be.

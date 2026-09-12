@@ -1,4 +1,5 @@
 import { defineSchedule } from "eve/schedules";
+import type { ScheduleHandlerArgs } from "eve/schedules";
 import sendblue from "#channels/sendblue.js";
 import { getAuthToken, redact, sessionExpiresAt } from "#lib/resy.js";
 import { ensureResyStore, loadResyTokens } from "#lib/resy-store.js";
@@ -51,18 +52,18 @@ async function armedSnipeCount(): Promise<number> {
 }
 
 async function text(
-  receive: Parameters<NonNullable<Parameters<typeof defineSchedule>[0]["run"]>>[0]["receive"],
-  appAuth: unknown,
+  to: ScheduleHandlerArgs["to"],
+  appAuth: ScheduleHandlerArgs["appAuth"],
   message: string,
 ): Promise<void> {
   const phone = process.env.OWNER_PHONE;
   if (!phone) return;
-  await receive(sendblue, { message, target: { phone }, auth: appAuth as never });
+  await to(sendblue, { phone }).send(message, { auth: appAuth });
 }
 
 export default defineSchedule({
   cron: "0 * * * *",
-  async run({ receive, appAuth }) {
+  async run({ to, appAuth }) {
     if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SECRET_KEY) return;
     // Load any travel override before any clock is read; see primeOwnerTimezone.
     await primeOwnerTimezone();
@@ -87,7 +88,7 @@ export default defineSchedule({
       const armed = await armedSnipeCount();
       try {
         await text(
-          receive,
+          to,
           appAuth,
           `Lucy's connection to Resy has stopped working and can't fix itself — this account ` +
             `signs in with a texted code, so it needs the owner. ` +
@@ -125,7 +126,7 @@ export default defineSchedule({
     const armed = await armedSnipeCount();
     try {
       await text(
-        receive,
+        to,
         appAuth,
         `Lucy's Resy login expires in ${daysLeft} day${daysLeft === 1 ? "" : "s"} and has to be ` +
           `renewed by hand, because this account signs in with a texted code. ` +
