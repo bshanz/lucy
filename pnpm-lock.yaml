@@ -21,7 +21,7 @@ importers:
         specifier: ^7.0.93
         version: 7.0.99(zod@4.6.2)
       eve:
-        specifier: ^0.51.1
+        specifier: ~0.51.1
         version: 0.51.1(ai@7.0.99(zod@4.6.2))
       heic-decode:
         specifier: ^2.1.0
