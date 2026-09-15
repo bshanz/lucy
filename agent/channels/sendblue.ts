@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { UserContent } from "ai";
 import { startAuthorization } from "@vercel/connect";
-import { defineChannel, GET, POST } from "eve/channels";
+import { type ChannelSource, defineChannel, GET, POST } from "eve/channels";
 import { parseInputResponses } from "eve/client";
 import type { SessionAuthContext } from "eve/context";
 import { isRunningStaleCode, recordPinnedDeployment } from "#lib/deployment.js";
@@ -54,25 +54,133 @@ function secretMatches(candidate: string | null): boolean {
  * matcher only fires when the WHOLE message equals an option id, label, or
  * index, and the poller coalesces adjacent texts into one message — so "yes"
  * typed after an unrelated text never matches on its own. A structured
- * `respond()` bypasses the matcher and resolves the request regardless. (Since
- * eve 0.54 unrelated text no longer parks behind a pending approval; it runs
- * as a normal turn while the approval stays open, so this store is about
- * resolving reliably, not about unblocking held text.)
+ * `respond()` bypasses the matcher and resolves the request regardless.
+ *
+ * The store is a MERGE, never an overwrite, and it is swept on every inbound
+ * text. Both rules come from 2026-09-13: eve raised a second approval for the
+ * same reply_to_email call while the first was still open, the second card
+ * overwrote the first here, the owner's "1" answered only the survivor, and
+ * the orphan sat pending for two days. eve parks a turn after any tool step
+ * while an approval is outstanding, so from then on every turn that touched a
+ * tool ended without a reply until the next text happened to wake it — likes
+ * on reminders, "remind me…", all of it. The session never errored once.
+ *
+ * So: a new request whose action (tool + input) matches a stored one
+ * supersedes it, and ingress cancels superseded or day-old requests before
+ * dispatching anything. A cancelled duplicate costs the model one line; an
+ * invisible pending approval costs every reply.
  */
 type PendingOption = { id: string; label: string };
-type PendingRequest = { requestId: string; options: PendingOption[] };
+export type PendingRequest = {
+  requestId: string;
+  options: PendingOption[];
+  kind?: string;
+  /** `toolName:stableJson(input)` for tool approvals; what "the same action" means. */
+  fingerprint?: string;
+  raisedAt?: string;
+  /** Replaced by a newer request for the identical action; cancel at next ingress. */
+  superseded?: boolean;
+};
+
+/** An approval nobody has answered in a day is abandoned, not pending. */
+const STALE_APPROVAL_MS = 24 * 3600 * 1000;
 
 const pendingInputKey = (phone: string) => `sendblue:pending_input:${phone}`;
 
-async function storePendingRequests(phone: string, requests: PendingRequest[]): Promise<void> {
+export async function readPendingRequests(phone: string): Promise<PendingRequest[]> {
+  const { data } = await supabase
+    .from("channel_state")
+    .select("value")
+    .eq("key", pendingInputKey(phone))
+    .maybeSingle();
+  const requests = (data?.value as { requests?: PendingRequest[] } | null)?.requests;
+  return Array.isArray(requests) ? requests : [];
+}
+
+export async function writePendingRequests(phone: string, requests: PendingRequest[]): Promise<void> {
+  if (requests.length === 0) {
+    await supabase.from("channel_state").delete().eq("key", pendingInputKey(phone));
+    return;
+  }
   await supabase.from("channel_state").upsert(
     [{ key: pendingInputKey(phone), value: { requests }, updated_at: new Date().toISOString() }],
     { onConflict: "key" },
   );
 }
 
-async function clearPendingRequests(phone: string): Promise<void> {
-  await supabase.from("channel_state").delete().eq("key", pendingInputKey(phone));
+export function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value as object)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableJson((value as Record<string, unknown>)[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** Merge newly raised requests into the store, marking same-action elders superseded. */
+export async function mergePendingRequests(phone: string, incoming: PendingRequest[]): Promise<void> {
+  const existing = await readPendingRequests(phone);
+  const incomingIds = new Set(incoming.map((r) => r.requestId));
+  const incomingFingerprints = new Set(incoming.map((r) => r.fingerprint).filter(Boolean));
+  const kept = existing
+    .filter((r) => !incomingIds.has(r.requestId))
+    .map((r) =>
+      r.fingerprint && incomingFingerprints.has(r.fingerprint) ? { ...r, superseded: true } : r,
+    );
+  await writePendingRequests(phone, [...kept, ...incoming]);
+}
+
+/** Drop the requests ingress just answered; anything else stays for the sweep. */
+export async function removePendingRequests(phone: string, requestIds: string[]): Promise<void> {
+  const drop = new Set(requestIds);
+  const remaining = (await readPendingRequests(phone)).filter((r) => !drop.has(r.requestId));
+  await writePendingRequests(phone, remaining);
+}
+
+/**
+ * Cancel requests that can no longer be a live question — superseded by a
+ * newer request for the same action, or unanswered for a day — so they cannot
+ * keep the session parking after every tool step. Runs before each dispatch.
+ * eve drops a response for a request it no longer holds, so this is safe to
+ * repeat. Never throws; a failed sweep must not cost the text that triggered it.
+ */
+async function cancelStalePendingRequests(
+  phone: string,
+  source: ChannelSource<SendblueState>,
+  auth: SessionAuthContext,
+): Promise<void> {
+  try {
+    const now = Date.now();
+    const stale = (await readPendingRequests(phone)).filter(
+      (r) =>
+        r.superseded === true ||
+        (r.raisedAt !== undefined && now - Date.parse(r.raisedAt) > STALE_APPROVAL_MS),
+    );
+    if (stale.length === 0) return;
+    const responses = stale.flatMap((r) => {
+      const optionId = resolveIntent("deny", r.options ?? []);
+      return optionId === undefined ? [] : [{ requestId: r.requestId, optionId }];
+    });
+    console.warn(
+      `[sendblue] cancelling ${stale.length} stale pending request(s) for ${phone}: ` +
+        stale.map((r) => `${r.requestId}${r.superseded ? " (superseded)" : " (>24h)"}`).join(", "),
+    );
+    if (responses.length > 0) {
+      await source.respond(parseInputResponses(responses), {
+        auth,
+        context: [
+          "The approval request(s) just cancelled were stale duplicates or had gone unanswered " +
+            "for over a day. Do not act on them and do not bring them up unless asked.",
+        ],
+        state: { phone },
+      });
+    }
+    await removePendingRequests(phone, stale.map((r) => r.requestId));
+  } catch (err) {
+    console.error("[sendblue] stale pending sweep failed", err);
+  }
 }
 
 /**
@@ -165,13 +273,7 @@ async function writeWindow(phone: string, window: SessionWindow): Promise<void> 
 }
 
 async function hasPendingRequests(phone: string): Promise<boolean> {
-  const { data } = await supabase
-    .from("channel_state")
-    .select("value")
-    .eq("key", pendingInputKey(phone))
-    .maybeSingle();
-  const requests = (data?.value as { requests?: PendingRequest[] } | null)?.requests;
-  return Array.isArray(requests) && requests.length > 0;
+  return (await readPendingRequests(phone)).some((r) => r.superseded !== true);
 }
 
 /**
@@ -298,15 +400,9 @@ async function matchPendingResponses(
   phone: string,
   text: string,
 ): Promise<{ requestId: string; optionId: string }[]> {
-  const { data } = await supabase
-    .from("channel_state")
-    .select("value")
-    .eq("key", pendingInputKey(phone))
-    .maybeSingle();
-  const requests = (data?.value as { requests?: PendingRequest[] } | null)?.requests;
-  if (!Array.isArray(requests)) return [];
   const responses: { requestId: string; optionId: string }[] = [];
-  for (const request of requests) {
+  for (const request of await readPendingRequests(phone)) {
+    if (request.superseded) continue;
     const optionId = matchOption(text, request.options ?? []);
     if (optionId) responses.push({ requestId: request.requestId, optionId });
   }
@@ -410,7 +506,7 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
         auth: sendblueAuth(phone),
         state: { phone },
       });
-      await clearPendingRequests(phone).catch(() => {});
+      await removePendingRequests(phone, responses.map((r) => r.requestId)).catch(() => {});
       return Response.json({ resolved: responses });
     }),
 
@@ -468,6 +564,7 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
           const context = ownerTimeContext();
           const auth = sendblueAuth(phone);
           const source = from(await sessionToken(phone));
+          await cancelStalePendingRequests(phone, source, auth);
           // Same builder as the poller, so the two ingress paths can never
           // disagree about what an inbound image turns into.
           const message = await buildTurnMessage(body);
@@ -477,7 +574,7 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
               : [];
           if (responses.length > 0) {
             await source.respond(parseInputResponses(responses), { auth, context, state: { phone } });
-            await clearPendingRequests(phone).catch(() => {});
+            await removePendingRequests(phone, responses.map((r) => r.requestId)).catch(() => {});
           } else {
             await source.send(message, { auth, context, state: { phone } });
           }
@@ -497,6 +594,7 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
     const context = ownerTimeContext();
     const auth = input.auth ?? sendblueAuth(phone);
     const source = from(await sessionToken(phone));
+    await cancelStalePendingRequests(phone, source, auth);
     const message: string | UserContent = input.message;
     if (typeof message === "string") {
       const responses = await matchPendingResponses(phone, message).catch(() => []);
@@ -506,7 +604,7 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
           context,
           state: { phone },
         });
-        await clearPendingRequests(phone).catch(() => {});
+        await removePendingRequests(phone, responses.map((r) => r.requestId)).catch(() => {});
         return session;
       }
     }
@@ -533,15 +631,24 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
     // until one arrives the request stays pending (a session-limit prompt
     // parks the turn) — without this handler Lucy asks nothing and goes dark.
     async "input.requested"(data, channel) {
-      // Persist before texting so a fast reply can't race the store.
-      const optionRequests = data.requests
+      // Persist before texting so a fast reply can't race the store. Merged,
+      // not overwritten — see the PendingRequest comment for the outage that
+      // an overwrite caused.
+      const raisedAt = new Date().toISOString();
+      const optionRequests: PendingRequest[] = data.requests
         .filter((request) => (request.options?.length ?? 0) > 0)
         .map((request) => ({
           requestId: request.requestId,
           options: (request.options ?? []).map((option) => ({ id: option.id, label: option.label })),
+          kind: request.kind,
+          fingerprint:
+            request.kind === "tool-approval"
+              ? `${request.action.toolName}:${stableJson(request.action.input ?? null)}`
+              : undefined,
+          raisedAt,
         }));
       if (optionRequests.length > 0) {
-        await storePendingRequests(channel.state.phone, optionRequests).catch((err) =>
+        await mergePendingRequests(channel.state.phone, optionRequests).catch((err) =>
           console.error("[sendblue] failed to persist pending input", err),
         );
       }
