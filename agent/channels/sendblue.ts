@@ -6,6 +6,7 @@ import { parseInputResponses } from "eve/client";
 import type { SessionAuthContext } from "eve/context";
 import { isRunningStaleCode, recordPinnedDeployment } from "#lib/deployment.js";
 import { gmailConnectorUid, OWNER_SUBJECT, ownerEmailAddress } from "#lib/gmail.js";
+import { formatApprovalCard, formatOptions } from "#lib/approval-card.js";
 import { toImessageText } from "#lib/imessage-format.js";
 import { buildTurnMessage, hasPayload } from "#lib/inbound-media.js";
 import { ownerTimeContext, primeOwnerTimezone } from "#lib/reminders.js";
@@ -655,36 +656,27 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       for (const request of data.requests) {
         const lines: string[] = [];
         const options = request.options ?? [];
-        if (request.kind === "tool-approval" || request.kind === "session-limit") {
-          // eve writes a prompt per confirmation kind — "Approve tool call: X"
-          // for tool approvals, a paragraph explaining the guardrail for the
-          // session-limit continuation. Rendering toolName instead turned that
-          // last one into "session_limit_continuation" plus raw numbers.
-          lines.push(`⚠️ ${request.prompt || `Approval needed: ${request.action.toolName}`}`);
-          // Keep the call input: "Approve tool call: Bash" is not enough to
-          // approve on — the owner needs to see the command itself.
-          for (const [key, value] of Object.entries(request.action.input ?? {})) {
-            const text = typeof value === "string" ? value : JSON.stringify(value);
-            lines.push(`${key}: ${text.length > 1200 ? `${text.slice(0, 1200)}…` : text}`);
-          }
+        if (request.kind === "tool-approval") {
+          // One card per gated tool, in the owner's words (when, where, who,
+          // how much) rather than eve's "Approve tool call: X" plus a raw
+          // `key: value` dump of the input. Unknown tools fall back to a
+          // tidied dump; the input is always shown because "Approve tool
+          // call: Bash" is not enough to approve on.
+          lines.push(...formatApprovalCard(request.action.toolName, request.action.input ?? {}));
+        } else if (request.kind === "session-limit") {
+          // eve's own prompt here is a paragraph explaining the guardrail;
+          // rendering toolName instead turned it into
+          // "session_limit_continuation" plus raw numbers.
+          lines.push(`⚠️ ${request.prompt}`);
         } else {
           lines.push(request.prompt);
         }
-        // Always list the request's own options rather than hardcoding
+        // Always use the request's own options rather than hardcoding
         // approve/cancel: ids and labels vary by kind (approve/cancel → Yes/No
         // for tools, continue/stop → Approve/Stop for the session limit), and
         // matchOption only resolves an id, a label, or a 1-based index. The old
         // hardcoded 'reply "deny"' matched nothing on a session-limit prompt.
-        options.forEach((option, index) => {
-          lines.push(`${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`);
-        });
-        if (options.length > 0) {
-          lines.push(
-            request.allowFreeform
-              ? "Reply with a number or option name, or answer in your own words."
-              : "Reply with a number or option name.",
-          );
-        }
+        lines.push(...formatOptions(options, request.allowFreeform ?? false));
         await channel.reply(lines.join("\n"));
       }
     },

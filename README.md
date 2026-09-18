@@ -57,6 +57,7 @@ Slack    ⇄ Vercel Connect–brokered webhooks          │
 
 Design decisions worth knowing about (they're where the bugs live):
 
+- **Approval cards read like a message, not a stack trace.** eve raises a gated call as "Approve tool call: X" plus the raw input; the iMessage channel renders each gated tool (calendar, email, Resy) as its own card instead: bold title, the when/where/who/how-much in plain words, the body of an email in full, then "Reply 1 to Approve or 2 to Cancel." Wall-clock strings are shown exactly as passed, since they are owner-local by contract. Unknown tools fall back to a tidied dump, never a bare prompt. `agent/lib/approval-card.ts`, pinned by `scripts/check-approval-card.ts`.
 - **Pending approvals are merged, fingerprinted, and swept.** eve parks a turn after any tool step while an approval is outstanding, and an approval nobody can see is fatal: every tool-using turn then ends without a reply until the next text happens to wake it, with no error anywhere (2026-09-13, two days). The iMessage channel therefore merges every raised request into its store, marks an elder superseded when a newer request has the identical tool+input, and cancels superseded or day-old requests before dispatching each inbound text. `scripts/check-pending-store.ts` pins the rules; `POST /sendblue/resolve-input?option=deny` is the manual escape hatch (the alias sits behind Vercel Authentication, so go through the CLI: `vercel curl "/sendblue/resolve-input?option=deny" --deployment https://<app>.vercel.app --yes -- -X POST -H "Authorization: Bearer $LUCY_AGENT_SECRET"`). Symptom to recognise: reminders and tapbacks get acted on but no conversational reply ever comes, while scheduled deliveries still arrive.
 - **Claim-before-dispatch, everywhere.** Interrupted cron steps re-run in eve's durability model. Every ingress path atomically claims a message id (or flips a reminder's status) *before* dispatching to the agent, and reverts the claim on failure. A crash loses one reply at worst - it never double-texts you. This is also what lets the polling and webhook ingress run concurrently against the same inbox.
 - **The model never does timezone math.** Tools accept owner-timezone wall-clock strings (`2026-08-01T17:00`); a tested converter handles UTC and DST (including the fall-back day, and recurrences that hold 5pm across clock changes). LLMs are bad at offsets exactly twice a year, which is the worst kind of bad.
@@ -224,6 +225,7 @@ Verify without booking anything:
 npx tsx scripts/check-calendar-logic.ts                      # guest-list logic, no network
 npx tsx scripts/check-resy-logic.ts                          # pure logic, no network
 npx tsx scripts/check-timezone-override.ts                   # travel mode, no network
+npx tsx scripts/check-approval-card.ts                       # iMessage approval cards, no network
 npx tsx --env-file=.env.local scripts/check-resy-claim.ts    # no double-booking
 npx tsx --env-file=.env.local scripts/check-resy-live.ts     # live, stops before /3/book
 ```
@@ -304,6 +306,8 @@ scripts/
   authorize-gmail.mjs    # mints the dev-environment Google grant
   connect-resy.ts        # links Resy from the CLI (--send is opt-in; it texts you)
   check-calendar-logic.ts # pure checks: guest-list normalise/merge, duration on a move
+  check-approval-card.ts # pure checks: one card per gated tool (calendar, email,
+                         #   resy), wall clocks rendered as written, options footer
   check-resy-logic.ts    # pure checks: slot ranking, deposit cap, DST, unit boundary
   check-timezone-override.ts # travel mode: the recurring re-anchor, DST, the
                          #   EST-means-Panama trap, and that every ingress primes
