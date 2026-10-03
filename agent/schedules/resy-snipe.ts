@@ -65,8 +65,6 @@ const LOOKAHEAD_MS = 90_000;
 const GRACE_MS = 120_000;
 /** A 'firing' row older than this was orphaned by a crash mid-race. */
 const STUCK_MS = 10 * 60_000;
-/** How long one invocation watches before releasing its lease to the next tick. */
-const WATCH_PASS_MS = 50_000;
 /** Detection granularity in watch mode. Fast enough to matter, slow enough to be polite. */
 const WATCH_POLL_INTERVAL_MS = 3_000;
 /** A watch lease older than this was orphaned; let another worker take the row. */
@@ -113,6 +111,26 @@ const DROP_WINDOW_MAX_MS = 6 * 3600_000;
  * morning of requests, once.
  */
 const HOT_WINDOW_MS = 45 * 60_000;
+/**
+ * Inside the hot zone, the few minutes nearest `expected_drop_at` poll every
+ * second rather than every three.
+ *
+ * 3s was not fast enough. The Obstinate Daughter, 2026-10-03: the hot path ran
+ * exactly as designed, saw the 8-tops at 00:23:47, and every one was gone by
+ * the time /book was called — the same sub-2-second evaporation that lost Le
+ * Café LV. Half the 3s interval on average is spent not yet knowing, so the
+ * sprint pays ~600 extra requests, once, to take that from ~1.5s to ~0.5s
+ * exactly where a release is most likely to land.
+ */
+const SPRINT_WINDOW_MS = 5 * 60_000;
+const SPRINT_POLL_INTERVAL_MS = 1_000;
+/**
+ * Hand the lease back this long before the next cron minute starts. A fixed 50s
+ * pass left a ~10s blind spot every minute — a one-in-six chance a drop landed
+ * while nobody was looking. Ending just before the minute boundary shrinks the
+ * gap to the cron's own start-up latency.
+ */
+const LEASE_RELEASE_BEFORE_TICK_MS = 1_500;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 
@@ -157,13 +175,26 @@ type RaceOutcome =
  *    is the normal case, not an error — 404/412 means "gone", so take the next
  *    one rather than aborting the whole snipe.
  */
-async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
-  const prefs = {
+function prefsOf(snipe: ResySnipeRow) {
+  return {
     earliestTime: hhmm(snipe.earliest_time),
     latestTime: hhmm(snipe.latest_time),
     preferredTime: snipe.preferred_time ? hhmm(snipe.preferred_time) : null,
     slotTypes: snipe.slot_types,
   };
+}
+
+/**
+ * `seed` is inventory a watch has ALREADY seen and ranked for the primary size.
+ * Booking straight from it skips the find loop's re-fetch — one full round trip
+ * that, at the Obstinate Daughter, was part of arriving after the tables had
+ * gone. Without a seed the race finds its own slots, as the precise path needs.
+ */
+async function race(
+  snipe: ResySnipeRow,
+  seed?: { ranked: ResySlot[]; partySize: number },
+): Promise<RaceOutcome> {
+  const prefs = prefsOf(snipe);
 
   // The party sizes he authorized, in the order he wants them. Both are asked
   // inside the SAME poll rather than one after the other, because a drop that
@@ -173,9 +204,10 @@ async function race(snipe: ResySnipeRow): Promise<RaceOutcome> {
   const primarySize = sizes[0];
   const sizeLabel = sizes.length > 1 ? `${sizes[0]} or ${sizes[1]}` : `${sizes[0]}`;
 
-  let ranked: ResySlot[] = [];
-  let partySize = snipe.party_size;
-  let polls = 0;
+  let ranked: ResySlot[] = seed?.ranked ?? [];
+  let partySize = seed?.partySize ?? snipe.party_size;
+  // A seed means there's nothing to find; start the poll loop already finished.
+  let polls = seed ? MAX_FIND_POLLS : 0;
   let sawSlotsOutsideWindow = false;
   // A fallback table found while the primary is still empty is held, not taken.
   // Refreshed every poll so it can't go stale, and released after the grace.
@@ -404,27 +436,36 @@ async function runWatch(
   // invocation and poll hard. See DROP_WINDOW_MAX_MS. A cancellation watch that
   // knows roughly when the release lands polls hard near that moment and stays
   // polite everywhere else — see HOT_WINDOW_MS.
-  const windowMs = Date.parse(snipe.watch_until!) - Date.parse(snipe.watch_from!);
-  const nearExpectedDrop =
-    snipe.expected_drop_at != null &&
-    Math.abs(Date.now() - Date.parse(snipe.expected_drop_at)) <= HOT_WINDOW_MS;
-  const isCancellationWatch = windowMs > DROP_WINDOW_MAX_MS && !nearExpectedDrop;
+  const watchUntil = Date.parse(snipe.watch_until!);
+  const windowMs = watchUntil - Date.parse(snipe.watch_from!);
+  const msFromExpected = () =>
+    snipe.expected_drop_at == null
+      ? Infinity
+      : Math.abs(Date.now() - Date.parse(snipe.expected_drop_at));
+  const isCancellationWatch = windowMs > DROP_WINDOW_MAX_MS && msFromExpected() > HOT_WINDOW_MS;
+  // A wide watch outlives one lost race: the drop is gone, but cancellations
+  // are exactly what the rest of the window is for.
+  const isLongWatch = watchUntil - Date.now() > DROP_WINDOW_MAX_MS;
 
+  const nextTick = Math.ceil((Date.now() + 1) / 60_000) * 60_000;
   const until = isCancellationWatch
     ? Date.now() // one pass, then release
     : Math.min(
-        Date.now() + WATCH_PASS_MS,
-        Date.parse(snipe.watch_until!), // never poll past the owner's window
+        nextTick - LEASE_RELEASE_BEFORE_TICK_MS,
+        watchUntil, // never poll past the owner's window
       );
 
   // Both authorized sizes are watched, not just the primary. A drop that never
   // publishes a table for the larger party is exactly the case a fallback exists
   // for, and watching only the primary would sit through it seeing nothing.
   const sizes = authorizedPartySizes(snipe);
+  const prefs = prefsOf(snipe);
 
   do {
-    let slots: ResySlot[] = [];
+    let sawInventory = false;
+    let inWindow: { ranked: ResySlot[]; partySize: number } | null = null;
     for (const size of sizes) {
+      let slots: ResySlot[];
       try {
         slots = await findSlots({
           venueId: snipe.venue_id,
@@ -437,27 +478,45 @@ async function runWatch(
           await finish(snipe, { kind: "failed", reason: err.message, attempts: 0 }, to, appAuth);
           return;
         }
-        // Transport noise mid-drop is expected; keep watching.
-        slots = [];
+        continue; // transport noise mid-drop is expected; keep watching
       }
-      if (slots.length > 0) break; // something published — hand it to the race
+      if (slots.length > 0) sawInventory = true;
+      const ranked = rankSlots(slots, prefs);
+      if (ranked.length > 0) {
+        inWindow = { ranked, partySize: size };
+        break;
+      }
     }
 
-    if (slots.length > 0) {
-      // Inventory exists. Stamp the moment BEFORE racing: this is the
-      // measurement that lets every future snipe at this venue use a precise
-      // drop_at instead of a wide window, and it must survive the race failing.
+    if (sawInventory && !snipe.detected_at) {
+      // The first sight of ANY inventory is the release time — the measurement
+      // that makes the next snipe here precise. Stamped once, and before any
+      // race, so it survives the race failing.
       const detectedAt = new Date().toISOString();
       await supabase.from("resy_snipes").update({ detected_at: detectedAt }).eq("id", snipe.id);
+      snipe = { ...snipe, detected_at: detectedAt };
+    }
 
-      // Hand to the same race the precise path uses — it re-fetches, ranks, and
-      // walks candidates identically.
-      const outcome = await race(snipe);
-      await finish({ ...snipe, detected_at: detectedAt }, outcome, to, appAuth);
+    // Inventory OUTSIDE his window is not an answer — it's the 10:30pm two-top
+    // that sits on every popular venue all day. Ending the watch on it killed
+    // three Obstinate Daughter re-arms on 2026-10-03, each within a minute of
+    // being armed. Only a table he'd actually take starts a race.
+    if (inWindow) {
+      // The primary size is booked straight from what was just seen. A
+      // fallback-only sighting goes through the race's own find loop, which
+      // holds it briefly in case the primary is about to publish.
+      const outcome = await race(snipe, inWindow.partySize === sizes[0] ? inWindow : undefined);
+      if (outcome.kind === "missed" && isLongWatch) {
+        await keepWatchingAfterLoss(snipe, outcome.reason, to, appAuth);
+        return;
+      }
+      await finish(snipe, outcome, to, appAuth);
       return;
     }
     if (isCancellationWatch) break;
-    await sleep(WATCH_POLL_INTERVAL_MS);
+    await sleep(
+      msFromExpected() <= SPRINT_WINDOW_MS ? SPRINT_POLL_INTERVAL_MS : WATCH_POLL_INTERVAL_MS,
+    );
   } while (Date.now() < until);
 
   // Window still open, nothing yet: release the lease for the next tick. This is
@@ -468,6 +527,52 @@ async function runWatch(
     .update({ fired_at: null })
     .eq("id", snipe.id)
     .eq("status", "armed");
+}
+
+/**
+ * A lost race on a watch with days still to run: say so, and keep watching.
+ *
+ * After the Obstinate Daughter loss the cancellation watch had to be re-armed by
+ * hand — the right move, made late. Here the row stays 'armed' and the lease is
+ * released, so the next tick resumes at the cancellation cadence. Returning
+ * (rather than polling on) caps a venue that keeps listing tables it won't book
+ * at one race per minute. Only the FIRST loss is texted; after that he has
+ * already been told it's still watching.
+ */
+async function keepWatchingAfterLoss(
+  snipe: ResySnipeRow,
+  reason: string,
+  to: To,
+  appAuth: ScheduleHandlerArgs["appAuth"],
+): Promise<void> {
+  const firstLoss = snipe.last_error == null;
+  await supabase
+    .from("resy_snipes")
+    .update({ fired_at: null, last_error: reason.slice(0, 500), updated_at: new Date().toISOString() })
+    .eq("id", snipe.id)
+    .eq("status", "armed");
+  if (!firstLoss) return;
+
+  const measured = snipe.detected_at
+    ? ` Tables first appeared at ${formatResyTime(snipe.detected_at)} — mention that briefly ` +
+      `as something useful learned about this restaurant.`
+    : "";
+  try {
+    await dispatch(
+      to,
+      appAuth,
+      snipe,
+      `A reservation snipe just lost the race: ${snipe.venue_name} on ${snipe.reservation_date} ` +
+        `for ${snipe.party_size}, wanted between ${formatTime(hhmm(snipe.earliest_time))} and ` +
+        `${formatTime(hhmm(snipe.latest_time))}. What happened: ${reason}. Nothing was booked. ` +
+        `It is STILL WATCHING for cancellations until ${formatResyTime(snipe.watch_until!)} and ` +
+        `will book one automatically inside the same bounds. Tell him both things in one or two ` +
+        `lines, without drama.` +
+        measured,
+    );
+  } catch (err) {
+    console.error("[resy-snipe] loss notice failed", err);
+  }
 }
 
 /**
@@ -615,10 +720,17 @@ export default defineSchedule({
           to,
           appAuth,
           s,
-          `A reservation watch just ended without anything opening: ${s.venue_name} on ` +
+          `A reservation watch just ended without booking anything: ${s.venue_name} on ` +
             `${s.reservation_date} for ${s.party_size}` +
             (s.fallback_party_size ? ` (or ${s.fallback_party_size})` : "") +
-            `. Nothing was booked and nothing is ` +
+            `, wanted between ${formatTime(hhmm(s.earliest_time))} and ` +
+            `${formatTime(hhmm(s.latest_time))}. ` +
+            (s.last_error
+              ? `It lost a race along the way (${s.last_error}) and nothing else came up. `
+              : s.detected_at
+                ? `Tables were released at ${formatResyTime(s.detected_at)}, but never one inside that window. `
+                : `Nothing was ever released. `) +
+            `Nothing was booked and nothing is ` +
             `still watching. Tell him in one short line and offer to try the next release.`,
         );
       } catch (err) {
