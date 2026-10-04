@@ -58,7 +58,12 @@ anything.
   `expectedDropLocal` inside the window: the 45 minutes either side of it poll
   every 3 seconds, the rest of the window stays once a minute. Wrong by an hour
   costs latency, not the night — so prefer this over shrinking the window to
-  a guess.
+  a guess. The 5 minutes either side poll every second.
+- **One watch covers the drop AND the cancellations after it.** Run the window
+  from just before the release through to the night itself. If the drop race
+  is lost, that watch texts him once and keeps looking for cancellations on its
+  own — don't re-arm it (you'll get "already armed", which is correct). Tables
+  outside his time window never end a watch.
 - When you arm a watch, say what it means in plain terms — "I'll be watching
   from 8:45 to 10:15 that morning and grab it the moment they're released" — not
   a drop time you don't actually have.
