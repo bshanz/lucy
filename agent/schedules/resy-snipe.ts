@@ -390,12 +390,16 @@ async function runSnipe(
   const dropAt = Date.parse(snipe.drop_at!);
 
   // --- Pre-warm, deliberately BEFORE the wait so the cost lands off the clock.
+  // A transport blip here isn't worth the table: race anyway, and the race's
+  // own requests retry the key and token on the way in.
   try {
     await Promise.all([resyApiKey(), getAuthToken(true)]);
   } catch (err) {
-    const reason = err instanceof ResyError ? err.message : redact(String(err));
-    await finish(snipe, { kind: "failed", reason, attempts: 0 }, to, appAuth);
-    return;
+    if (isFatalResyError(err)) {
+      await finish(snipe, { kind: "failed", reason: (err as ResyError).message, attempts: 0 }, to, appAuth);
+      return;
+    }
+    console.warn("[resy-snipe] pre-warm failed, racing anyway:", redact(String(err)));
   }
 
   // --- Hold to the deadline, minus a small lead: our clock and Resy's disagree,
@@ -427,8 +431,15 @@ async function runWatch(
   try {
     await Promise.all([resyApiKey(), getAuthToken(true)]);
   } catch (err) {
-    const reason = err instanceof ResyError ? err.message : redact(String(err));
-    await finish(snipe, { kind: "failed", reason, attempts: 0 }, to, appAuth);
+    // Only a problem the next tick can't outlast ends the watch. One bad
+    // resy.com fetch (a challenge page with no app bundle in it) killed a
+    // 13-day Obstinate Daughter watch on 2026-10-05; a blip skips one minute.
+    if (!isFatalResyError(err)) {
+      console.warn("[resy-snipe] pre-warm failed, retrying next tick:", redact(String(err)));
+      await releaseLease(snipe);
+      return;
+    }
+    await finish(snipe, { kind: "failed", reason: (err as ResyError).message, attempts: 0 }, to, appAuth);
     return;
   }
 
@@ -522,11 +533,20 @@ async function runWatch(
   // Window still open, nothing yet: release the lease for the next tick. This is
   // the whole reason watch rows keep status 'armed' — a status flip here would
   // consume the snipe on its first empty minute.
+  await releaseLease(snipe);
+}
+
+async function releaseLease(snipe: ResySnipeRow): Promise<void> {
   await supabase
     .from("resy_snipes")
     .update({ fired_at: null })
     .eq("id", snipe.id)
     .eq("status", "armed");
+}
+
+/** Errors that waiting a minute won't fix: bad credentials, missing config. */
+function isFatalResyError(err: unknown): err is ResyError {
+  return err instanceof ResyError && (err.kind === "auth" || err.kind === "not_configured");
 }
 
 /**

@@ -169,7 +169,12 @@ export async function resyApiKey(): Promise<string> {
     return key;
   } catch (err) {
     // A stale key still beats no key: it may not have rotated yet, and the
-    // caller gets a clean 419 rather than a crash if it has.
+    // caller gets a clean 419 rather than a crash if it has. The last key this
+    // instance scraped is fresher than any env var, so it goes first.
+    if (cachedKey) {
+      console.warn("[resy] api key scrape failed, reusing last scraped key:", redact(String(err)));
+      return cachedKey.key;
+    }
     if (fallback) {
       console.warn("[resy] api key scrape failed, using RESY_API_KEY_FALLBACK:", redact(String(err)));
       cachedKey = { key: fallback, at: Date.now() };
