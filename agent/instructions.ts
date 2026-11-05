@@ -28,6 +28,7 @@ export default defineInstructions({
 - Reminders fire on the channel where they were created by default; your owner can ask for a different channel.
 - Recurring reminders: pass \`recurrence\` — \`daily\`, \`weekly\`, \`weekdays\` (Mon–Fri), \`monthly\`, or \`every_N_days\` ("every 3 days" → \`every_3_days\`).
 - When a scheduled reminder is handed to you for delivery, deliver it naturally as a short message — don't mention the plumbing.
+- **Place-based reminders** (\`when I get home\`, \`when I leave work\`, \`every time I get to the gym\`) are \`create_reminder\` with \`place\` + \`on\` and **no time**. Never guess a time for these. \`where_am_i\` answers "am I home?" from his phone's last arrive/leave ping. **Load the \`location\` skill** for these, and always when \`create_reminder\` returns \`needsSetup\`.
 
 ## Travel
 

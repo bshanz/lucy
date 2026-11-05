@@ -8,8 +8,12 @@ export interface ReminderRow {
   phone: string | null;
   slack_target: { channelId: string; threadTs?: string } | null;
   body: string;
-  fire_at: string;
-  recurrence: string | null; // daily | weekly | weekdays | monthly | every_N_days
+  /** NULL only for a location reminder still waiting on its trigger. */
+  fire_at: string | null;
+  recurrence: string | null; // daily | weekly | weekdays | monthly | every_N_days | each_time
+  /** Location trigger (normalized place key + event); both null for timed reminders. */
+  trigger_place: string | null;
+  trigger_event: "arrive" | "leave" | null;
   // 'awaiting_delivery' = handed to the agent, not yet seen leaving for the
   //   owner. reminder-poll's confirmation pass promotes or re-queues it.
   // 'lapsed' = fired, never confirmed, out of nudges. Still on the books.
@@ -495,6 +499,8 @@ export async function reanchorRecurring(fromTz: string, toTz: string): Promise<n
     .from("reminders")
     .select("id, fire_at, recurrence")
     .not("recurrence", "is", null)
+    // Location series have no hour to keep — they wait on a place, not a clock.
+    .is("trigger_place", null)
     // Every live state of a series. A poll tick mid-dispatch could race this;
     // the window is one minute and the worst case is a single occurrence
     // delivered at the old local time, which is why it is not worth locking.

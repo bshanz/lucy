@@ -1,5 +1,6 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
+import { describeTrigger, type LocationEvent } from "#lib/location.js";
 import { formatLocal, primeOwnerTimezone, supabase } from "#lib/reminders.js";
 
 export default defineTool({
@@ -27,9 +28,10 @@ export default defineTool({
           : ["pending", "awaiting_delivery"];
     const { data, error } = await supabase
       .from("reminders")
-      .select("id, body, fire_at, recurrence, channel, status, sent_at")
+      .select("id, body, fire_at, recurrence, channel, status, sent_at, trigger_place, trigger_event")
       .in("status", statuses)
-      .order("fire_at", { ascending: true })
+      // Location reminders still waiting on a trigger have no time; list them last.
+      .order("fire_at", { ascending: true, nullsFirst: false })
       .limit(50);
     if (error) return { ok: false as const, error: error.message };
 
@@ -38,7 +40,17 @@ export default defineTool({
       reminders: (data ?? []).map((r) => ({
         id: r.id as string,
         body: r.body as string,
-        localTime: formatLocal(r.fire_at as string),
+        // A location reminder still waiting on its trigger has no time yet.
+        localTime: r.fire_at ? formatLocal(r.fire_at as string) : null,
+        ...(r.trigger_place
+          ? {
+              trigger: describeTrigger(
+                r.trigger_place as string,
+                r.trigger_event as LocationEvent,
+                "you",
+              ),
+            }
+          : {}),
         recurrence: (r.recurrence as string | null) ?? "one-off",
         channel: r.channel as string,
         state:

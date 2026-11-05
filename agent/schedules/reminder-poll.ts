@@ -1,6 +1,7 @@
 import { defineSchedule } from "eve/schedules";
 import sendblue from "#channels/sendblue.js";
 import slack from "#channels/slack.js";
+import { describeTrigger, rearmedFireAt } from "#lib/location.js";
 import { fetchRecentOutbound, type SendblueMessage } from "#lib/sendblue.js";
 import {
   expireTravelOverrideIfDue,
@@ -220,7 +221,10 @@ async function markDelivered(reminder: ReminderRow, deliveredAt: string): Promis
   const patch = reminder.recurrence
     ? {
         status: "pending",
-        fire_at: nextOccurrence(reminder.fire_at, reminder.recurrence),
+        // A location series goes back to waiting for the next arrival.
+        fire_at: rearmedFireAt(reminder, () =>
+          nextOccurrence(reminder.fire_at!, reminder.recurrence!),
+        ),
         sent_at: deliveredAt,
       }
     : {
@@ -261,7 +265,9 @@ async function requeue(reminder: ReminderRow): Promise<void> {
       .from("reminders")
       .update({
         status: "pending",
-        fire_at: nextOccurrence(reminder.fire_at, reminder.recurrence!),
+        fire_at: rearmedFireAt(reminder, () =>
+          nextOccurrence(reminder.fire_at!, reminder.recurrence!),
+        ),
         dispatched_at: null,
         delivery_attempts: 0,
       })
@@ -383,9 +389,13 @@ export default defineSchedule({
     if (due.length > 0) console.log(`[reminder-poll] delivering ${due.length} reminder(s)`);
 
     for (const reminder of due) {
-      const prompt =
-        `A reminder the owner scheduled earlier is due now: "${reminder.body}". ` +
-        `Deliver it to him as a short, natural reminder message.`;
+      const prompt = reminder.trigger_place && reminder.trigger_event
+        ? `The owner asked to be reminded ${describeTrigger(reminder.trigger_place, reminder.trigger_event)}, ` +
+          `and his phone just reported that he ${reminder.trigger_event === "arrive" ? "arrived at" : "left"} ` +
+          `${reminder.trigger_place.replace(/_/g, " ")}. The reminder: "${reminder.body}". ` +
+          `Deliver it to him as a short, natural reminder message.`
+        : `A reminder the owner scheduled earlier is due now: "${reminder.body}". ` +
+          `Deliver it to him as a short, natural reminder message.`;
       try {
         if (reminder.channel === "slack" && reminder.slack_target?.channelId) {
           await to(slack, { channelId: reminder.slack_target.channelId }).send(prompt, {

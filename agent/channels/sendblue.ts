@@ -8,6 +8,7 @@ import { isRunningStaleCode, recordPinnedDeployment } from "#lib/deployment.js";
 import { gmailConnectorUid, OWNER_SUBJECT, ownerEmailAddress } from "#lib/gmail.js";
 import { formatApprovalCard, formatOptions } from "#lib/approval-card.js";
 import { toImessageText } from "#lib/imessage-format.js";
+import { parseEvent, recordLocationEvent } from "#lib/location.js";
 import { buildTurnMessage, hasPayload } from "#lib/inbound-media.js";
 import { ownerTimeContext, primeOwnerTimezone } from "#lib/reminders.js";
 import { markRead, sendMessage, sendTypingIndicator } from "#lib/sendblue.js";
@@ -509,6 +510,34 @@ export default defineChannel<SendblueState, { state: SendblueState; reply: (text
       });
       await removePendingRequests(phone, responses.map((r) => r.requestId)).catch(() => {});
       return Response.json({ resolved: responses });
+    }),
+
+    // Location pings from the owner's iPhone (Shortcuts → Automation → "When I
+    // Arrive/Leave <place>" → Get Contents of URL). Body: {"place":"home","event":"arrive"}.
+    // Arms waiting location reminders; reminder-poll delivers them within a
+    // minute. The .vercel.app alias sits behind Vercel Authentication, so the
+    // Shortcut also sends x-vercel-protection-bypass.
+    POST("/location/event", async (req) => {
+      const bearer = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null;
+      if (!secretMatches(bearer)) return new Response("Unauthorized", { status: 401 });
+
+      const body = (await req.json().catch(() => null)) as { place?: unknown; event?: unknown } | null;
+      const event = parseEvent(body?.event);
+      if (typeof body?.place !== "string" || !body.place.trim() || !event) {
+        return Response.json(
+          { ok: false, error: 'expected {"place": "<name>", "event": "arrive" | "leave"}' },
+          { status: 400 },
+        );
+      }
+      try {
+        const result = await recordLocationEvent(body.place, event);
+        console.log(`[location] ${result.place} ${event}: ${result.status}` +
+          (result.status === "ok" ? `, armed ${result.triggered}` : ""));
+        return Response.json({ ok: true, ...result });
+      } catch (err) {
+        console.error("[location] event failed", err);
+        return Response.json({ ok: false, error: (err as Error).message }, { status: 500 });
+      }
     }),
 
     // Dormant until a webhook-capable Sendblue plan; the poller is ingress today.
