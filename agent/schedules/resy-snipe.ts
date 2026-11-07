@@ -428,6 +428,8 @@ async function runWatch(
   to: To,
   appAuth: ScheduleHandlerArgs["appAuth"],
 ): Promise<void> {
+  // Started alongside the pre-warm so the read is never in front of a poll.
+  const sightingLog = openSightingLog(snipe.id);
   try {
     await Promise.all([resyApiKey(), getAuthToken(true)]);
   } catch (err) {
@@ -471,69 +473,127 @@ async function runWatch(
   // for, and watching only the primary would sit through it seeing nothing.
   const sizes = authorizedPartySizes(snipe);
   const prefs = prefsOf(snipe);
+  const sightings = await sightingLog;
 
-  do {
-    let sawInventory = false;
-    let inWindow: { ranked: ResySlot[]; partySize: number } | null = null;
-    for (const size of sizes) {
-      let slots: ResySlot[];
-      try {
-        slots = await findSlots({
-          venueId: snipe.venue_id,
-          day: snipe.reservation_date,
-          partySize: size,
-          fast: true,
-        });
-      } catch (err) {
-        if (err instanceof ResyError && (err.kind === "auth" || err.kind === "not_configured")) {
-          await finish(snipe, { kind: "failed", reason: err.message, attempts: 0 }, to, appAuth);
+  try {
+    do {
+      let sawInventory = false;
+      let inWindow: { ranked: ResySlot[]; partySize: number } | null = null;
+      for (const size of sizes) {
+        let slots: ResySlot[];
+        try {
+          slots = await findSlots({
+            venueId: snipe.venue_id,
+            day: snipe.reservation_date,
+            partySize: size,
+            fast: true,
+          });
+        } catch (err) {
+          if (err instanceof ResyError && (err.kind === "auth" || err.kind === "not_configured")) {
+            await finish(snipe, { kind: "failed", reason: err.message, attempts: 0 }, to, appAuth);
+            return;
+          }
+          continue; // transport noise mid-drop is expected; keep watching
+        }
+        if (slots.length > 0) sawInventory = true;
+        const ranked = rankSlots(slots, prefs);
+        sightings.record(size, slots, ranked.length);
+        if (ranked.length > 0) {
+          inWindow = { ranked, partySize: size };
+          break;
+        }
+      }
+
+      if (sawInventory && !snipe.detected_at) {
+        // The first sight of ANY inventory is the release time — the measurement
+        // that makes the next snipe here precise. Stamped once, and before any
+        // race, so it survives the race failing.
+        const detectedAt = new Date().toISOString();
+        await supabase.from("resy_snipes").update({ detected_at: detectedAt }).eq("id", snipe.id);
+        snipe = { ...snipe, detected_at: detectedAt };
+      }
+
+      // Inventory OUTSIDE his window is not an answer — it's the 10:30pm two-top
+      // that sits on every popular venue all day. Ending the watch on it killed
+      // three Obstinate Daughter re-arms on 2026-10-03, each within a minute of
+      // being armed. Only a table he'd actually take starts a race.
+      if (inWindow) {
+        // The primary size is booked straight from what was just seen. A
+        // fallback-only sighting goes through the race's own find loop, which
+        // holds it briefly in case the primary is about to publish.
+        const outcome = await race(snipe, inWindow.partySize === sizes[0] ? inWindow : undefined);
+        if (outcome.kind === "missed" && isLongWatch) {
+          await keepWatchingAfterLoss(snipe, outcome.reason, to, appAuth);
           return;
         }
-        continue; // transport noise mid-drop is expected; keep watching
-      }
-      if (slots.length > 0) sawInventory = true;
-      const ranked = rankSlots(slots, prefs);
-      if (ranked.length > 0) {
-        inWindow = { ranked, partySize: size };
-        break;
-      }
-    }
-
-    if (sawInventory && !snipe.detected_at) {
-      // The first sight of ANY inventory is the release time — the measurement
-      // that makes the next snipe here precise. Stamped once, and before any
-      // race, so it survives the race failing.
-      const detectedAt = new Date().toISOString();
-      await supabase.from("resy_snipes").update({ detected_at: detectedAt }).eq("id", snipe.id);
-      snipe = { ...snipe, detected_at: detectedAt };
-    }
-
-    // Inventory OUTSIDE his window is not an answer — it's the 10:30pm two-top
-    // that sits on every popular venue all day. Ending the watch on it killed
-    // three Obstinate Daughter re-arms on 2026-10-03, each within a minute of
-    // being armed. Only a table he'd actually take starts a race.
-    if (inWindow) {
-      // The primary size is booked straight from what was just seen. A
-      // fallback-only sighting goes through the race's own find loop, which
-      // holds it briefly in case the primary is about to publish.
-      const outcome = await race(snipe, inWindow.partySize === sizes[0] ? inWindow : undefined);
-      if (outcome.kind === "missed" && isLongWatch) {
-        await keepWatchingAfterLoss(snipe, outcome.reason, to, appAuth);
+        await finish(snipe, outcome, to, appAuth);
         return;
       }
-      await finish(snipe, outcome, to, appAuth);
-      return;
-    }
-    if (isCancellationWatch) break;
-    await sleep(
-      msFromExpected() <= SPRINT_WINDOW_MS ? SPRINT_POLL_INTERVAL_MS : WATCH_POLL_INTERVAL_MS,
-    );
-  } while (Date.now() < until);
+      if (isCancellationWatch) break;
+      await sleep(
+        msFromExpected() <= SPRINT_WINDOW_MS ? SPRINT_POLL_INTERVAL_MS : WATCH_POLL_INTERVAL_MS,
+      );
+    } while (Date.now() < until);
+  } finally {
+    await sightings.flush();
+  }
 
   // Window still open, nothing yet: release the lease for the next tick. This is
   // the whole reason watch rows keep status 'armed' — a status flip here would
   // consume the snipe on its first empty minute.
   await releaseLease(snipe);
+}
+
+/**
+ * Records what a watch sees, one row per CHANGE per party size (see
+ * migration 0014). Writes are started but not awaited in the poll loop: at a
+ * drop, a database round trip in front of /3/book is the difference between a
+ * table and a "gone". flush() collects them before the invocation ends.
+ *
+ * The last-seen state is read from the table once per tick, so a change is
+ * judged against the previous minute's answer, not just this invocation's.
+ * Logging must never cost the snipe: every failure here is a console warning.
+ */
+async function openSightingLog(snipeId: string) {
+  const last = new Map<number, string>();
+  const pending: PromiseLike<unknown>[] = [];
+
+  try {
+    const { data } = await supabase
+      .from("resy_sightings")
+      .select("party_size, slots")
+      .eq("snipe_id", snipeId)
+      .order("seen_at", { ascending: false })
+      .limit(10);
+    for (const row of data ?? []) {
+      if (!last.has(row.party_size)) last.set(row.party_size, JSON.stringify(row.slots));
+    }
+  } catch (err) {
+    console.warn("[resy-snipe] sighting log read failed:", String(err));
+  }
+
+  return {
+    record(partySize: number, slots: ResySlot[], inWindow: number) {
+      const shape = slots
+        .map((s) => ({ time: s.time, type: s.type }))
+        .sort((a, b) => a.time.localeCompare(b.time) || String(a.type).localeCompare(String(b.type)));
+      const key = JSON.stringify(shape);
+      // Nothing logged yet and nothing there: an empty first poll is not news.
+      if (last.get(partySize) === key || (!last.has(partySize) && shape.length === 0)) return;
+      last.set(partySize, key);
+      pending.push(
+        supabase
+          .from("resy_sightings")
+          .insert({ snipe_id: snipeId, party_size: partySize, slots: shape, in_window: inWindow })
+          .then(({ error }) => {
+            if (error) console.warn("[resy-snipe] sighting log write failed:", error.message);
+          }),
+      );
+    },
+    async flush() {
+      await Promise.allSettled(pending);
+    },
+  };
 }
 
 async function releaseLease(snipe: ResySnipeRow): Promise<void> {
